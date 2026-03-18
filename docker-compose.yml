@@ -26,18 +26,6 @@ networks:
     name: benchmark-net
 
 volumes:
-  dataset:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${DATASET_PATH:-/data/3w/dataset}
-  results:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${RESULTS_PATH:-./results}
   prometheus-data: {}
   grafana-data: {}
   zookeeper-data: {}
@@ -69,11 +57,11 @@ services:
     networks:
       - benchmark-net
     healthcheck:
-      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181 | grep imok"]
+      test: ["CMD", "bash", "-c", "echo ruok | timeout 2 bash -c 'cat > /dev/tcp/localhost/2181' && echo ok || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 15s
+      retries: 10
+      start_period: 30s
 
 # =============================================================================
 # KAFKA BROKERS (3 nodes para suportar replication-factor=3 e fault tests)
@@ -120,11 +108,11 @@ services:
     networks:
       - benchmark-net
     healthcheck:
-      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "kafka-1:9092"]
+      test: ["CMD-SHELL", "kafka-topics --list --bootstrap-server kafka-1:9092 > /dev/null 2>&1"]
       interval: 15s
       timeout: 10s
-      retries: 5
-      start_period: 30s
+      retries: 10
+      start_period: 45s
 
   kafka-2:
     image: confluentinc/cp-kafka:7.5.0
@@ -165,11 +153,11 @@ services:
     networks:
       - benchmark-net
     healthcheck:
-      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "kafka-2:9092"]
+      test: ["CMD-SHELL", "kafka-topics --list --bootstrap-server kafka-2:9092 > /dev/null 2>&1"]
       interval: 15s
       timeout: 10s
-      retries: 5
-      start_period: 30s
+      retries: 10
+      start_period: 45s
 
   kafka-3:
     image: confluentinc/cp-kafka:7.5.0
@@ -210,11 +198,11 @@ services:
     networks:
       - benchmark-net
     healthcheck:
-      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "kafka-3:9092"]
+      test: ["CMD-SHELL", "kafka-topics --list --bootstrap-server kafka-3:9092 > /dev/null 2>&1"]
       interval: 15s
       timeout: 10s
-      retries: 5
-      start_period: 30s
+      retries: 10
+      start_period: 45s
 
 # =============================================================================
 # KAFKA UI (debug visual dos tópicos e consumer groups)
@@ -277,8 +265,8 @@ services:
       - "8081:8081"    # Flink Web UI / REST API
       - "9249:9249"    # Prometheus metrics (JobManager)
     volumes:
-      - dataset:/data/3w/dataset:ro
-      - results:/opt/results
+      - ${DATASET_PATH:-/data/3w/dataset}:/data/3w/dataset:ro
+      - ./results:/opt/results
     networks:
       - benchmark-net
     healthcheck:
@@ -312,8 +300,8 @@ services:
         metrics.reporter.prom.port: 9249
         taskmanager.network.memory.fraction: 0.1
     volumes:
-      - dataset:/data/3w/dataset:ro
-      - results:/opt/results
+      - ${DATASET_PATH:-/data/3w/dataset}:/data/3w/dataset:ro
+      - ./results:/opt/results
     networks:
       - benchmark-net
     deploy:
@@ -349,8 +337,8 @@ services:
       - "7077:7077"    # Spark Master RPC
       - "4040:4040"    # Spark Application UI (driver)
     volumes:
-      - dataset:/data/3w/dataset:ro
-      - results:/opt/results
+      - ${DATASET_PATH:-/data/3w/dataset}:/data/3w/dataset:ro
+      - ./results:/opt/results
     networks:
       - benchmark-net
     healthcheck:
@@ -377,8 +365,8 @@ services:
       SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
       SPARK_SSL_ENABLED: "no"
     volumes:
-      - dataset:/data/3w/dataset:ro
-      - results:/opt/results
+      - ${DATASET_PATH:-/data/3w/dataset}:/data/3w/dataset:ro
+      - ./results:/opt/results
     networks:
       - benchmark-net
     deploy:
