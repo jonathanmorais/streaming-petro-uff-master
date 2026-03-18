@@ -1,0 +1,50 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    project: benchmark3w
+
+# =============================================================================
+# Targets de scrape
+# =============================================================================
+scrape_configs:
+
+  # Prometheus auto-monitoramento
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Prometheus Pushgateway (métricas do producer Python)
+  - job_name: pushgateway
+    honor_labels: true
+    static_configs:
+      - targets: ["pushgateway:9091"]
+
+  # Kafka Exporter (consumer lag por grupo/tópico/partição)
+  - job_name: kafka_exporter
+    static_configs:
+      - targets: ["kafka-exporter:9308"]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: kafka-cluster
+
+  # Flink JobManager metrics
+  - job_name: flink_jobmanager
+    static_configs:
+      - targets: ["flink-jobmanager:9249"]
+    metrics_path: /
+
+  # Flink TaskManager metrics (múltiplas réplicas via DNS)
+  - job_name: flink_taskmanager
+    dns_sd_configs:
+      - names:
+          - tasks.benchmark3w-flink-taskmanager
+        type: A
+        port: 9249
+
+  # Spark Master UI (métricas via PrometheusServlet)
+  - job_name: spark_master
+    static_configs:
+      - targets: ["spark-master:4040"]
+    metrics_path: /metrics/prometheus

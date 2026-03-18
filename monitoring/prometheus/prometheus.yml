@@ -1,0 +1,70 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    project: benchmark3w
+
+# Regras de alertas (opcional — arquivo criado em monitoring/prometheus/rules/)
+rule_files:
+  - "rules/*.yml"
+
+# =============================================================================
+# Targets de scrape
+# =============================================================================
+scrape_configs:
+
+  # Prometheus auto-monitoramento
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Prometheus Pushgateway (métricas do producer Python via prometheus-client)
+  - job_name: pushgateway
+    honor_labels: true
+    static_configs:
+      - targets: ["pushgateway:9091"]
+
+  # Kafka Exporter (consumer lag por grupo/tópico/partição)
+  - job_name: kafka_exporter
+    scrape_interval: 10s
+    static_configs:
+      - targets: ["kafka-exporter:9308"]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: kafka-cluster
+
+  # Flink JobManager metrics (via Prometheus Reporter integrado ao Flink)
+  - job_name: flink_jobmanager
+    scrape_interval: 10s
+    static_configs:
+      - targets: ["flink-jobmanager:9249"]
+    metrics_path: /
+
+  # Flink TaskManager metrics (múltiplas réplicas — usa serviço Docker DNS)
+  # O Flink expõe métricas na porta 9249 em cada TaskManager
+  - job_name: flink_taskmanager
+    scrape_interval: 10s
+    dns_sd_configs:
+      - names:
+          - tasks.benchmark3w-flink-taskmanager
+        type: A
+        port: 9249
+    metrics_path: /
+
+  # Spark Master UI (métricas via PrometheusServlet na porta 4040)
+  - job_name: spark_master
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["spark-master:4040"]
+    metrics_path: /metrics/prometheus
+
+  # Spark Workers (se exposto; exige configuração adicional no Bitnami Spark)
+  - job_name: spark_worker
+    scrape_interval: 15s
+    dns_sd_configs:
+      - names:
+          - tasks.benchmark3w-spark-worker
+        type: A
+        port: 4040
+    metrics_path: /metrics/prometheus

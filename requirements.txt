@@ -1,0 +1,101 @@
+# =============================================================================
+# Benchmark 3W — Dependências Python
+# Flink vs Spark Structured Streaming com Dataset Petrobras 3W
+#
+# Python 3.10+ requerido.
+#
+# Instalação:
+#   pip install -r requirements.txt
+#
+# Para ambientes isolados (recomendado):
+#   python -m venv .venv
+#   source .venv/bin/activate
+#   pip install -r requirements.txt
+#
+# ATENÇÃO: apache-flink e pyspark são pesados (~500MB cada).
+#          Em ambientes onde apenas um dos engines é necessário,
+#          comente a dependência não utilizada.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Kafka
+# -----------------------------------------------------------------------------
+
+# Cliente Kafka Python: producer, consumer, AdminClient
+kafka-python>=2.0.2
+
+# -----------------------------------------------------------------------------
+# Stream Processing Engines
+# -----------------------------------------------------------------------------
+
+# PyFlink — API Python para Apache Flink 1.18
+# Inclui: Table API, DataStream API, connectors
+apache-flink>=1.18.0
+
+# PySpark — Apache Spark 3.5 com Structured Streaming
+# Inclui: spark-sql-kafka connector (via spark.jars.packages)
+pyspark>=3.5.0
+
+# -----------------------------------------------------------------------------
+# Observabilidade / Métricas
+# -----------------------------------------------------------------------------
+
+# Cliente Python para Prometheus (exposition + push gateway)
+prometheus-client>=0.19.0
+
+# HTTP para consultas à API REST do Prometheus, Flink e Spark UI
+requests>=2.31.0
+
+# -----------------------------------------------------------------------------
+# Dados / Computação numérica
+# -----------------------------------------------------------------------------
+
+# Arrays e cálculo de percentis (p50, p95, p99)
+numpy>=1.26.0
+
+# DataFrames: leitura dos Parquet do 3W, manipulação de resultados
+pandas>=2.1.0
+
+# Backend Parquet (leitura dos arquivos 3W comprimidos com brotli)
+pyarrow>=14.0.0
+
+# -----------------------------------------------------------------------------
+# Logging estruturado
+# -----------------------------------------------------------------------------
+
+# Structured logging compatível com sistemas de observabilidade
+structlog>=23.2.0
+
+# -----------------------------------------------------------------------------
+# Orquestração
+# -----------------------------------------------------------------------------
+
+# Apache Airflow: DAG de orquestração do benchmark completo
+# Instala também: alembic, flask, celery e dependências do scheduler
+apache-airflow>=2.7.0
+
+# Provider Airflow para integração com Apache Kafka
+apache-airflow-providers-apache-kafka>=1.2.0
+
+# -----------------------------------------------------------------------------
+# Relatórios / CLI
+# -----------------------------------------------------------------------------
+
+# Tabelas coloridas no terminal para relatórios de comparação
+rich>=13.7.0
+
+# Carregamento do arquivo .env como variáveis de ambiente
+python-dotenv>=1.0.0
+
+# -----------------------------------------------------------------------------
+# Utilitários (implícitos, mas fixados para reprodutibilidade)
+# -----------------------------------------------------------------------------
+
+# Retry automático com backoff exponencial (producer e collectors)
+tenacity>=8.2.3
+
+# Serialização/deserialização JSON mais rápida (mensagens Kafka)
+orjson>=3.9.10
+
+# Tipagem avançada para Python 3.10+
+typing-extensions>=4.9.0

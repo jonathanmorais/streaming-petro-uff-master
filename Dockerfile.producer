@@ -1,0 +1,28 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Dependências do sistema
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Dependências Python (apenas as necessárias para o producer)
+COPY requirements.txt .
+RUN pip install --no-cache-dir \
+    kafka-python>=2.0.2 \
+    pandas>=2.1.0 \
+    pyarrow>=14.0.0 \
+    structlog>=23.2.0 \
+    prometheus-client>=0.19.0 \
+    python-dotenv>=1.0.0 \
+    numpy>=1.26.0
+
+# Copiar código fonte
+COPY producer/ ./producer/
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+
+ENTRYPOINT ["python", "-m", "producer.producer"]
+CMD ["--speed-factor", "1.0"]

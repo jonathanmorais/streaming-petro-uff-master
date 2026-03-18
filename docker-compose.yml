@@ -1,0 +1,505 @@
+version: "3.8"
+
+# =============================================================================
+# Benchmark 3W — Kafka + Flink vs Spark Structured Streaming
+# Dataset: Petrobras 3W (séries temporais de sensores de poços offshore)
+# =============================================================================
+#
+# Serviços:
+#   - Zookeeper (dependência Kafka)
+#   - Kafka broker x3 (alta disponibilidade + fault tolerance tests)
+#   - Kafka UI (debug visual)
+#   - Flink JobManager + TaskManager (escalonável)
+#   - Spark Master + Worker (escalonável)
+#   - Prometheus + Grafana + Pushgateway (observabilidade)
+#   - Kafka Exporter (consumer lag no Prometheus)
+#
+# Uso básico:
+#   docker-compose up -d
+#   docker-compose scale flink-taskmanager=3
+#   docker-compose scale spark-worker=3
+# =============================================================================
+
+networks:
+  benchmark-net:
+    driver: bridge
+    name: benchmark-net
+
+volumes:
+  dataset:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATASET_PATH:-/data/3w/dataset}
+  results:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${RESULTS_PATH:-./results}
+  prometheus-data: {}
+  grafana-data: {}
+  zookeeper-data: {}
+  zookeeper-log: {}
+  kafka-1-data: {}
+  kafka-2-data: {}
+  kafka-3-data: {}
+
+# =============================================================================
+# ZOOKEEPER
+# =============================================================================
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: ${COMPOSE_PROJECT_NAME:-benchmark3w}-zookeeper
+    hostname: zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_SYNC_LIMIT: 5
+      ZOOKEEPER_INIT_LIMIT: 10
+      ZOOKEEPER_MAX_CLIENT_CNXNS: 120
+      ZOOKEEPER_LOG4J_ROOT_LOGLEVEL: WARN
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-log:/var/lib/zookeeper/log
+    networks:
+      - benchmark-net
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181 | grep imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+# =============================================================================
+# KAFKA BROKERS (3 nodes para suportar replication-factor=3 e fault tests)
+# =============================================================================
+
+  kafka-1:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: ${COMPOSE_PROJECT_NAME:-benchmark3w}-kafka-1
+    hostname: kafka-1
+    restart: unless-stopped
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,PLAINTEXT_INTERNAL://0.0.0.0:29092"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-1:9092,PLAINTEXT_INTERNAL://kafka-1:29092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
+      KAFKA_NUM_PARTITIONS: 8
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_LOG_RETENTION_MS: 604800000        # 7 dias
+      KAFKA_LOG_SEGMENT_MS: 3600000            # 1 hora
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
+      KAFKA_MESSAGE_MAX_BYTES: 1048576         # 1 MiB
+      KAFKA_REPLICA_FETCH_MAX_BYTES: 1048576
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false" # Criação controlada pelo benchmark
+      KAFKA_DELETE_TOPIC_ENABLE: "true"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG4J_ROOT_LOGLEVEL: WARN
+      KAFKA_TOOLS_LOG4J_LOGLEVEL: ERROR
+      # JMX para monitoramento Prometheus
+      KAFKA_JMX_PORT: 9999
+      KAFKA_JMX_HOSTNAME: kafka-1
+    volumes:
+      - kafka-1-data:/var/lib/kafka/data
+    ports:
+      - "9092:9092"
+    networks:
+      - benchmark-net
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "kafka-1:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  kafka-2:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: ${COMPOSE_PROJECT_NAME:-benchmark3w}-kafka-2
+    hostname: kafka-2
+    restart: unless-stopped
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 2
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,PLAINTEXT_INTERNAL://0.0.0.0:29092"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-2:9092,PLAINTEXT_INTERNAL://kafka-2:29092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
+      KAFKA_NUM_PARTITIONS: 8
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_LOG_RETENTION_MS: 604800000
+      KAFKA_LOG_SEGMENT_MS: 3600000
+      KAFKA_MESSAGE_MAX_BYTES: 1048576
+      KAFKA_REPLICA_FETCH_MAX_BYTES: 1048576
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_DELETE_TOPIC_ENABLE: "true"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG4J_ROOT_LOGLEVEL: WARN
+      KAFKA_TOOLS_LOG4J_LOGLEVEL: ERROR
+      KAFKA_JMX_PORT: 9999
+      KAFKA_JMX_HOSTNAME: kafka-2
+    volumes:
+      - kafka-2-data:/var/lib/kafka/data
+    ports:
+      - "9093:9092"
+    networks:
+      - benchmark-net
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "kafka-2:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  kafka-3:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: ${COMPOSE_PROJECT_NAME:-benchmark3w}-kafka-3
+    hostname: kafka-3
+    restart: unless-stopped
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 3
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,PLAINTEXT_INTERNAL://0.0.0.0:29092"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-3:9092,PLAINTEXT_INTERNAL://kafka-3:29092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
+      KAFKA_NUM_PARTITIONS: 8
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_LOG_RETENTION_MS: 604800000
+      KAFKA_LOG_SEGMENT_MS: 3600000
+      KAFKA_MESSAGE_MAX_BYTES: 1048576
+      KAFKA_REPLICA_FETCH_MAX_BYTES: 1048576
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_DELETE_TOPIC_ENABLE: "true"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG4J_ROOT_LOGLEVEL: WARN
+      KAFKA_TOOLS_LOG4J_LOGLEVEL: ERROR
+      KAFKA_JMX_PORT: 9999
+      KAFKA_JMX_HOSTNAME: kafka-3
+    volumes:
+      - kafka-3-data:/var/lib/kafka/data
+    ports:
+      - "9094:9092"
+    networks:
+      - benchmark-net
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "kafka-3:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+# =============================================================================
+# KAFKA UI (debug visual dos tópicos e consumer groups)
+# =============================================================================
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-benchmark3w}-kafka-ui
+    hostname: kafka-ui
+    restart: unless-stopped
+    depends_on:
+      kafka-1:
+        condition: service_healthy
+      kafka-2:
+        condition: service_healthy
+      kafka-3:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: benchmark-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "kafka-1:9092,kafka-2:9092,kafka-3:9092"
+      KAFKA_CLUSTERS_0_ZOOKEEPER: "zookeeper:2181"
+      DYNAMIC_CONFIG_ENABLED: "true"
+      LOGGING_LEVEL_ROOT: WARN
+    ports:
+      - "8090:8080"
+    networks:
+      - benchmark-net
+
+# =============================================================================
+# APACHE FLINK
+# =============================================================================
+
+  flink-jobmanager:
+    image: apache/flink:1.18-scala_2.12
+    container_name: ${COMPOSE_PROJECT_NAME:-benchmark3w}-flink-jobmanager
+    hostname: flink-jobmanager
+    restart: unless-stopped
+    command: jobmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        jobmanager.memory.process.size: 1600m
+        taskmanager.memory.process.size: 2048m
+        taskmanager.numberOfTaskSlots: 4
+        parallelism.default: 4
+        state.backend: rocksdb
+        state.backend.incremental: "true"
+        state.checkpoints.dir: file:///tmp/flink-checkpoints
+        execution.checkpointing.interval: 10s
+        execution.checkpointing.mode: EXACTLY_ONCE
+        execution.checkpointing.timeout: 60s
+        execution.checkpointing.max-concurrent-checkpoints: 1
+        execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
+        metrics.reporters: prom
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
+        taskmanager.network.memory.fraction: 0.1
+        web.backpressure.refresh-interval: 5000
+    ports:
+      - "8081:8081"    # Flink Web UI / REST API
+      - "9249:9249"    # Prometheus metrics (JobManager)
+    volumes:
+      - dataset:/data/3w/dataset:ro
+      - results:/opt/results
+    networks:
+      - benchmark-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/overview"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  flink-taskmanager:
+    image: apache/flink:1.18-scala_2.12
+    hostname: flink-taskmanager
+    restart: unless-stopped
+    command: taskmanager
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        jobmanager.memory.process.size: 1600m
+        taskmanager.memory.process.size: 2048m
+        taskmanager.numberOfTaskSlots: 4
+        state.backend: rocksdb
+        state.backend.incremental: "true"
+        state.checkpoints.dir: file:///tmp/flink-checkpoints
+        execution.checkpointing.interval: 10s
+        execution.checkpointing.mode: EXACTLY_ONCE
+        metrics.reporters: prom
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
+        taskmanager.network.memory.fraction: 0.1
+    volumes:
+      - dataset:/data/3w/dataset:ro
+      - results:/opt/results
+    networks:
+      - benchmark-net
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2200M
+
+# =============================================================================
+# APACHE SPARK
+# =============================================================================
+
+  spark-master:
+    image: bitnami/spark:3.5
+    container_name: ${COMPOSE_PROJECT_NAME:-benchmark3w}-spark-master
+    hostname: spark-master
+    restart: unless-stopped
+    environment:
+      SPARK_MODE: master
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
+      SPARK_SSL_ENABLED: "no"
+      SPARK_MASTER_OPTS: >-
+        -Dspark.metrics.conf.*.sink.prometheusServlet.class=org.apache.spark.metrics.sink.PrometheusServlet
+        -Dspark.metrics.conf.*.sink.prometheusServlet.path=/metrics/prometheus
+        -Dspark.ui.prometheus.enabled=true
+      # Configurações de streaming
+      SPARK_CONF_DIR: /opt/bitnami/spark/conf
+    ports:
+      - "8082:8080"    # Spark Master Web UI
+      - "7077:7077"    # Spark Master RPC
+      - "4040:4040"    # Spark Application UI (driver)
+    volumes:
+      - dataset:/data/3w/dataset:ro
+      - results:/opt/results
+    networks:
+      - benchmark-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  spark-worker:
+    image: bitnami/spark:3.5
+    hostname: spark-worker
+    restart: unless-stopped
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_MEMORY: 2G
+      SPARK_WORKER_CORES: 2
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
+      SPARK_SSL_ENABLED: "no"
+    volumes:
+      - dataset:/data/3w/dataset:ro
+      - results:/opt/results
+    networks:
+      - benchmark-net
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2300M
+
+# =============================================================================
+# OBSERVABILIDADE: Prometheus + Grafana + Pushgateway
+# =============================================================================
+
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: ${COMPOSE_PROJECT_NAME:-benchmark3w}-prometheus
+    hostname: prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+      - "--web.enable-lifecycle"
+      - "--web.enable-admin-api"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    networks:
+      - benchmark-net
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: ${COMPOSE_PROJECT_NAME:-benchmark3w}-grafana
+    hostname: grafana
+    restart: unless-stopped
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: benchmark3w
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/benchmark_overview.json
+      GF_PROVISIONING_PATH: /etc/grafana/provisioning
+      GF_LOG_LEVEL: warn
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - benchmark-net
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  pushgateway:
+    image: prom/pushgateway:v1.6.2
+    container_name: ${COMPOSE_PROJECT_NAME:-benchmark3w}-pushgateway
+    hostname: pushgateway
+    restart: unless-stopped
+    command:
+      - "--web.listen-address=:9091"
+      - "--persistence.file=/tmp/pushgateway.data"
+      - "--persistence.interval=5m"
+    ports:
+      - "9091:9091"
+    networks:
+      - benchmark-net
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9091/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+# =============================================================================
+# KAFKA EXPORTER (consumer lag como métricas Prometheus)
+# =============================================================================
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-benchmark3w}-kafka-exporter
+    hostname: kafka-exporter
+    restart: unless-stopped
+    command:
+      - "--kafka.server=kafka-1:9092"
+      - "--kafka.server=kafka-2:9092"
+      - "--kafka.server=kafka-3:9092"
+      - "--web.listen-address=:9308"
+      - "--topic.filter=3w.*"
+      - "--group.filter=.*"
+      - "--log.level=warn"
+    depends_on:
+      kafka-1:
+        condition: service_healthy
+      kafka-2:
+        condition: service_healthy
+      kafka-3:
+        condition: service_healthy
+    ports:
+      - "9308:9308"
+    networks:
+      - benchmark-net
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9308/metrics"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
