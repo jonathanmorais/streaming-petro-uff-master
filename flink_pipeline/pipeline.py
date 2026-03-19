@@ -65,8 +65,17 @@ def build_pipeline(parallelism: int) -> None:
     # -----------------------------------------------------------------------
     # 1. Criar ambiente de execução
     # -----------------------------------------------------------------------
+    import os
     env = StreamExecutionEnvironment.get_execution_environment()
     env.set_parallelism(parallelism)
+
+    # Adicionar JAR do conector Kafka explicitamente
+    pyflink_lib = os.path.join(
+        os.path.dirname(__import__("pyflink").__file__), "lib"
+    )
+    kafka_jar = os.path.join(pyflink_lib, "flink-sql-connector-kafka-3.1.0-1.18.jar")
+    if os.path.exists(kafka_jar):
+        env.add_jars(f"file://{kafka_jar}")
 
     # Aplicar configurações do Flink
     cfg = env.get_config()
@@ -119,7 +128,7 @@ def build_pipeline(parallelism: int) -> None:
         )
         .map(
             lambda raw: _parse_json(raw),
-            output_type=Types.MAP(Types.STRING(), Types.STRING()),
+            output_type=Types.PICKLED_BYTE_ARRAY(),
         )
         .filter(lambda msg: msg is not None)
         .key_by(lambda msg: msg.get("well_id", "unknown"))

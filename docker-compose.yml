@@ -405,10 +405,11 @@ services:
       start_period: 10s
 
   grafana:
-    image: grafana/grafana:10.2.0
+    image: grafana/grafana:latest
     container_name: ${COMPOSE_PROJECT_NAME:-benchmark3w}-grafana
     hostname: grafana
     restart: unless-stopped
+    privileged: true
     depends_on:
       prometheus:
         condition: service_healthy
@@ -416,8 +417,7 @@ services:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: benchmark3w
       GF_USERS_ALLOW_SIGN_UP: "false"
-      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/benchmark_overview.json
-      GF_PROVISIONING_PATH: /etc/grafana/provisioning
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/benchmark_3w.json
       GF_LOG_LEVEL: warn
     ports:
       - "3000:3000"

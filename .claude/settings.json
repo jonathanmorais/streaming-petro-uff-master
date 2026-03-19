@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/jonathan/streaming-petro-uff-master/**)",
+      "Bash(docker-compose restart:*)",
+      "Bash(docker-compose stop:*)",
+      "Bash(docker image:*)",
+      "Bash(docker run:*)",
+      "Bash(curl -s http://localhost:3001/api/health 2)",
+      "Bash(1 docker:*)",
+      "Bash(curl -s http://localhost:3001/api/health)"
+    ]
+  }
+}

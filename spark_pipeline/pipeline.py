@@ -15,7 +15,10 @@ import threading
 import time
 
 import structlog
-from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+import json
+import time as _time
+
+from prometheus_client import CollectorRegistry, Gauge, Histogram, Counter, push_to_gateway
 
 from spark_pipeline.config import (
     CHECKPOINT_LOCATION,
@@ -55,6 +58,19 @@ processed_rows_per_second = Gauge(
 batch_duration_ms = Gauge(
     "spark_streaming_batchDuration",
     "Duração de cada micro-batch em ms",
+    ["scenario"],
+    registry=_registry,
+)
+e2e_latency_histogram = Histogram(
+    "benchmark_3w_spark_e2e_latency_ms",
+    "Latência fim-a-fim do pipeline Spark SS (ms)",
+    ["scenario"],
+    buckets=[50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000],
+    registry=_registry,
+)
+windows_total = Counter(
+    "benchmark_3w_spark_windows_total",
+    "Total de janelas processadas pelo Spark SS",
     ["scenario"],
     registry=_registry,
 )
@@ -121,12 +137,8 @@ class _MetricsListener:
                     batch_duration_ms.labels(scenario=scenario).set(
                         progress.durationMs.get("triggerExecution", 0) or 0
                     )
-                    push_to_gateway(
-                        PUSHGATEWAY_URL,
-                        job="3w_spark_pipeline",
-                        registry=_registry,
-                        grouping_key={"scenario": scenario},
-                    )
+                    # Coletar latências e2e do sink via foreachBatch
+                    _push_metrics(scenario)
                 except Exception as exc:
                     logger.warning("erro_push_gateway", error=str(exc))
 
@@ -134,6 +146,32 @@ class _MetricsListener:
                 pass
 
         return _Listener()
+
+
+def _push_metrics(scenario: str) -> None:
+    try:
+        push_to_gateway(
+            PUSHGATEWAY_URL,
+            job="3w_spark_pipeline",
+            registry=_registry,
+            grouping_key={"scenario": scenario},
+        )
+    except Exception as exc:
+        logger.warning("erro_push_gateway", error=str(exc))
+
+
+def _record_latencies(batch_df, batch_id: int, scenario: str) -> None:
+    """Chamado pelo foreachBatch — registra latências e2e no histogram."""
+    now_ms = int(_time.time() * 1000)
+    try:
+        rows = batch_df.select("e2e_latency_ms").collect()
+        for row in rows:
+            lat = row["e2e_latency_ms"]
+            if lat is not None and lat >= 0:
+                e2e_latency_histogram.labels(scenario=scenario).observe(float(lat))
+                windows_total.labels(scenario=scenario).inc()
+    except Exception as exc:
+        logger.warning("erro_record_latencias", error=str(exc))
 
 
 def main() -> None:
@@ -171,6 +209,25 @@ def main() -> None:
     grouped = add_watermark_and_window(parsed)
     features = calculate_features(grouped)
     output = prepare_sink_output(features)
+
+    # -----------------------------------------------------------------------
+    # Query de métricas (latência e2e → Prometheus via foreachBatch)
+    # -----------------------------------------------------------------------
+    _scenario = args.scenario
+
+    def _metrics_batch(batch_df, batch_id):
+        _record_latencies(batch_df, batch_id, _scenario)
+        _push_metrics(_scenario)
+
+    metrics_query = (
+        features.select("e2e_latency_ms")
+        .writeStream
+        .foreachBatch(_metrics_batch)
+        .option("checkpointLocation", args.checkpoint_location + "-metrics")
+        .trigger(processingTime=TRIGGER_INTERVAL)
+        .outputMode("update")
+        .start()
+    )
 
     # -----------------------------------------------------------------------
     # Sink Kafka

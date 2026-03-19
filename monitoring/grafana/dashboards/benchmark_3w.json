@@ -1,0 +1,301 @@
+{
+  "__inputs": [],
+  "__requires": [],
+  "annotations": { "list": [] },
+  "description": "Benchmark 3W Petrobras — Flink vs Spark Structured Streaming",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "Producer",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 500 },
+              { "color": "red", "value": 1000 }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "id": 1,
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "title": "Mensagens Produzidas (total)",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(benchmark_3w_producer_messages_total)",
+          "legendFormat": "total",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "ms/s", "color": { "mode": "palette-classic" } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 18, "x": 6, "y": 1 },
+      "id": 2,
+      "options": { "tooltip": { "mode": "multi" } },
+      "title": "Taxa de Produção (msg/s)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(benchmark_3w_producer_messages_total[1m]))",
+          "legendFormat": "producer msg/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "id": 101,
+      "title": "Latência Fim-a-Fim (e2e_latency_ms)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2 }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Spark p50" }, "properties": [ { "id": "color", "value": { "fixedColor": "#FF9830", "mode": "fixed" } } ] },
+          { "matcher": { "id": "byName", "options": "Flink p50" }, "properties": [ { "id": "color", "value": { "fixedColor": "#73BF69", "mode": "fixed" } } ] }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "id": 10,
+      "title": "Latência E2E — Spark vs Flink (percentis)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(benchmark_3w_spark_e2e_latency_ms_bucket[2m])) by (le))",
+          "legendFormat": "Spark p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(benchmark_3w_spark_e2e_latency_ms_bucket[2m])) by (le))",
+          "legendFormat": "Spark p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(benchmark_3w_spark_e2e_latency_ms_bucket[2m])) by (le))",
+          "legendFormat": "Spark p99",
+          "refId": "C"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(benchmark_3w_flink_e2e_latency_ms_bucket[2m])) by (le))",
+          "legendFormat": "Flink p50",
+          "refId": "D"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(benchmark_3w_flink_e2e_latency_ms_bucket[2m])) by (le))",
+          "legendFormat": "Flink p95",
+          "refId": "E"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(benchmark_3w_flink_e2e_latency_ms_bucket[2m])) by (le))",
+          "legendFormat": "Flink p99",
+          "refId": "F"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 1000 },
+            { "color": "red", "value": 5000 }
+          ]}
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 6 },
+      "id": 11,
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["mean"] } },
+      "title": "Spark — Latência Média (ms)",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "sum(rate(benchmark_3w_spark_e2e_latency_ms_sum[5m])) / sum(rate(benchmark_3w_spark_e2e_latency_ms_count[5m]))",
+          "legendFormat": "média",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 500 },
+            { "color": "red", "value": 2000 }
+          ]}
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 6 },
+      "id": 12,
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["mean"] } },
+      "title": "Flink — Latência Média (ms)",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "sum(rate(benchmark_3w_flink_e2e_latency_ms_sum[5m])) / sum(rate(benchmark_3w_flink_e2e_latency_ms_count[5m]))",
+          "legendFormat": "média",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "id": 102,
+      "title": "Throughput",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "ops", "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 15 },
+      "id": 20,
+      "title": "Throughput — Spark vs Flink (resultados/s)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(benchmark_3w_spark_windows_total[1m]))",
+          "legendFormat": "Spark windows/s",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(benchmark_3w_flink_results_total[1m]))",
+          "legendFormat": "Flink results/s",
+          "refId": "B"
+        },
+        {
+          "expr": "spark_streaming_inputRowsPerSecond",
+          "legendFormat": "Spark inputRows/s ({{scenario}})",
+          "refId": "C"
+        },
+        {
+          "expr": "spark_streaming_processedRowsPerSecond",
+          "legendFormat": "Spark processedRows/s ({{scenario}})",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+      "id": 103,
+      "title": "Spark Structured Streaming",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 24 },
+      "id": 30,
+      "title": "Spark — Duração do Micro-batch (ms)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "spark_streaming_batchDuration",
+          "legendFormat": "batch duration ({{scenario}})",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "ops", "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 24 },
+      "id": 31,
+      "title": "Spark — Input vs Processed Rows/s",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "spark_streaming_inputRowsPerSecond",
+          "legendFormat": "input ({{scenario}})",
+          "refId": "A"
+        },
+        {
+          "expr": "spark_streaming_processedRowsPerSecond",
+          "legendFormat": "processed ({{scenario}})",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 },
+      "id": 104,
+      "title": "Detecção de Anomalias",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "short", "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 32 },
+      "id": 40,
+      "title": "Anomalias Detectadas por Poço (Flink)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (well_id) (benchmark_3w_flink_anomalies_total)",
+          "legendFormat": "{{well_id}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "tags": ["3w", "petrobras", "benchmark", "flink", "spark"],
+  "templating": { "list": [] },
+  "time": { "from": "now-30m", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "3W Benchmark — Flink vs Spark",
+  "uid": "benchmark3w",
+  "version": 1
+}
