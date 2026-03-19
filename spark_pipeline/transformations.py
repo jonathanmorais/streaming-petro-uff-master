@@ -188,9 +188,6 @@ def prepare_sink_output(df: DataFrame) -> DataFrame:
 
     result = df.select(*output_cols)
 
-    # Serializar para JSON como valor Kafka
-    value_expr = F.to_json(F.struct(*[c._jc.toString() for c in output_cols]))  # type: ignore
-
     return result.select(
         F.col("well_id").cast("string").alias("key"),
         F.to_json(F.struct(*result.columns)).alias("value"),

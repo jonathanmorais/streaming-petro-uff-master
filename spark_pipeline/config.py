@@ -40,13 +40,8 @@ SPARK_CONFIG: dict[str, str] = {
     # Streaming checkpoint
     "spark.sql.streaming.checkpointLocation": CHECKPOINT_LOCATION,
 
-    # State store backend RocksDB (comparação justa com Flink)
-    "spark.sql.streaming.stateStore.providerClass": (
-        "org.apache.spark.sql.execution.streaming.state.RocksDBStateStoreProvider"
-    ),
-
-    # Kafka connector (Spark 3.5 + Scala 2.12)
-    "spark.jars.packages": "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0",
+    # Kafka connector (Spark 4.1.1 + Scala 2.13)
+    "spark.jars.packages": "org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.1",
 
     # Memória
     "spark.executor.memory": os.getenv("SPARK_EXECUTOR_MEMORY", "2g"),

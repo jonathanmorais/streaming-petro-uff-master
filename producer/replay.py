@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Iterator
 
 import pandas as pd
+import pyarrow.parquet as pq
 import structlog
 
 from producer.schema import build_message
@@ -60,25 +61,30 @@ class WellReplayer:
         self._errors: int = 0
 
     # ------------------------------------------------------------------
-    def _load_dataframe(self) -> pd.DataFrame:
-        """Carrega o Parquet e retorna DataFrame com index DatetimeIndex."""
-        df = pd.read_parquet(self.parquet_path, engine="pyarrow")
-        if not isinstance(df.index, pd.DatetimeIndex):
-            df.index = pd.to_datetime(df.index)
-        return df
-
-    def _iter_rows(self, df: pd.DataFrame) -> Iterator[tuple[pd.Timestamp, pd.Series, float]]:
-        """Itera linhas do DataFrame, emitindo (timestamp, row, progress)."""
-        total = len(df)
-        for idx, (ts, row) in enumerate(df.iterrows()):
-            progress = idx / total if total > 0 else 0.0
-            yield ts, row, progress
+    def _iter_rows(self) -> Iterator[tuple[pd.Timestamp, pd.Series, float]]:
+        """
+        Itera linhas do Parquet em batches de 500 linhas para limitar uso de memória.
+        Cada thread só mantém um batch em RAM em vez do arquivo inteiro.
+        """
+        pf = pq.ParquetFile(self.parquet_path)
+        total = pf.metadata.num_rows
+        idx = 0
+        for batch in pf.iter_batches(batch_size=500):
+            df_batch = batch.to_pandas()
+            # Garantir DatetimeIndex no timestamp
+            if "timestamp" in df_batch.columns:
+                df_batch = df_batch.set_index("timestamp")
+            if not isinstance(df_batch.index, pd.DatetimeIndex):
+                df_batch.index = pd.to_datetime(df_batch.index)
+            for ts, row in df_batch.iterrows():
+                yield ts, row, (idx / total if total > 0 else 0.0)
+                idx += 1
 
     def run(self) -> None:
         """
         Loop principal de replay.
-        Lê o Parquet e publica cada linha no Kafka com sleep proporcional
-        ao delta de tempo entre observações dividido pelo speed_factor.
+        Lê o Parquet em batches e publica cada linha no Kafka com sleep
+        proporcional ao delta de tempo entre observações dividido pelo speed_factor.
         """
         log = logger.bind(well_id=self.well_id, event_code=self.event_code)
         log.info("iniciando_replay", parquet=str(self.parquet_path))
@@ -86,51 +92,48 @@ class WellReplayer:
         iteration = 0
         while not self.stop_event.is_set():
             iteration += 1
-            try:
-                df = self._load_dataframe()
-            except Exception as exc:
-                log.error("erro_ao_carregar_parquet", error=str(exc))
-                return
-
             prev_ts: pd.Timestamp | None = None
 
-            for ts, row, progress in self._iter_rows(df):
-                if self.stop_event.is_set():
-                    break
+            try:
+                for ts, row, progress in self._iter_rows():
+                    if self.stop_event.is_set():
+                        break
 
-                # Calcular sleep baseado no delta de tempo original
-                if prev_ts is not None:
-                    delta_s = (ts - prev_ts).total_seconds()
-                    sleep_s = delta_s / self.speed_factor
-                    if sleep_s > 0:
-                        # Fragmentar o sleep para checar stop_event periodicamente
-                        end_time = time.monotonic() + sleep_s
-                        while time.monotonic() < end_time and not self.stop_event.is_set():
-                            time.sleep(min(0.05, end_time - time.monotonic()))
-                prev_ts = ts
+                    # Calcular sleep baseado no delta de tempo original
+                    if prev_ts is not None:
+                        delta_s = (ts - prev_ts).total_seconds()
+                        sleep_s = delta_s / self.speed_factor
+                        if sleep_s > 0:
+                            end_time = time.monotonic() + sleep_s
+                            while time.monotonic() < end_time and not self.stop_event.is_set():
+                                time.sleep(min(0.05, end_time - time.monotonic()))
+                    prev_ts = ts
 
-                if self.stop_event.is_set():
-                    break
+                    if self.stop_event.is_set():
+                        break
 
-                # Construir e publicar mensagem
-                try:
-                    msg = build_message(
-                        well_id=self.well_id,
-                        source=self.source,
-                        event_code=self.event_code,
-                        timestamp=ts,
-                        row=row,
-                        instance_progress=progress,
-                    )
-                    self.producer.send(
-                        self.topic,
-                        key=self.well_id.encode("utf-8"),
-                        value=msg,
-                    )
-                    self._messages_sent += 1
-                except Exception as exc:
-                    self._errors += 1
-                    log.warning("erro_ao_publicar", error=str(exc))
+                    try:
+                        msg = build_message(
+                            well_id=self.well_id,
+                            source=self.source,
+                            event_code=self.event_code,
+                            timestamp=ts,
+                            row=row,
+                            instance_progress=progress,
+                        )
+                        self.producer.send(
+                            self.topic,
+                            key=self.well_id.encode("utf-8"),
+                            value=msg,
+                        )
+                        self._messages_sent += 1
+                    except Exception as exc:
+                        self._errors += 1
+                        log.warning("erro_ao_publicar", error=str(exc))
+
+            except Exception as exc:
+                log.error("erro_ao_ler_parquet", error=str(exc))
+                return
 
             log.debug("iteracao_concluida", iteration=iteration, messages=self._messages_sent)
 

@@ -319,22 +319,18 @@ services:
 # =============================================================================
 
   spark-master:
-    image: bitnami/spark:3.5
+    image: apache/spark:3.5.0
     container_name: ${COMPOSE_PROJECT_NAME:-benchmark3w}-spark-master
     hostname: spark-master
     restart: unless-stopped
+    user: root
+    command: ["/opt/spark/sbin/start-master.sh"]
     environment:
-      SPARK_MODE: master
-      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
-      SPARK_RPC_ENCRYPTION_ENABLED: "no"
-      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
-      SPARK_SSL_ENABLED: "no"
       SPARK_MASTER_OPTS: >-
         -Dspark.metrics.conf.*.sink.prometheusServlet.class=org.apache.spark.metrics.sink.PrometheusServlet
         -Dspark.metrics.conf.*.sink.prometheusServlet.path=/metrics/prometheus
         -Dspark.ui.prometheus.enabled=true
-      # Configurações de streaming
-      SPARK_CONF_DIR: /opt/bitnami/spark/conf
+      SPARK_NO_DAEMONIZE: "true"
     ports:
       - "8082:8080"    # Spark Master Web UI
       - "7077:7077"    # Spark Master RPC
@@ -352,21 +348,18 @@ services:
       start_period: 20s
 
   spark-worker:
-    image: bitnami/spark:3.5
+    image: apache/spark:3.5.0
     hostname: spark-worker
     restart: unless-stopped
+    user: root
+    command: ["/opt/spark/sbin/start-worker.sh", "spark://spark-master:7077"]
     depends_on:
       spark-master:
         condition: service_healthy
     environment:
-      SPARK_MODE: worker
-      SPARK_MASTER_URL: spark://spark-master:7077
-      SPARK_WORKER_MEMORY: 2G
-      SPARK_WORKER_CORES: 2
-      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
-      SPARK_RPC_ENCRYPTION_ENABLED: "no"
-      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
-      SPARK_SSL_ENABLED: "no"
+      SPARK_WORKER_MEMORY: 2g
+      SPARK_WORKER_CORES: "2"
+      SPARK_NO_DAEMONIZE: "true"
     volumes:
       - ${DATASET_PATH:-/data/3w/dataset}:/data/3w/dataset:ro
       - ./results:/opt/results

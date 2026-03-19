@@ -98,32 +98,42 @@ class _MetricsListener:
     """
     Listener Spark para coleta de métricas de streaming.
     Enviada via push gateway a cada micro-batch.
+    Deve herdar de StreamingQueryListener após a SparkSession ser criada.
     """
 
-    def __init__(self, scenario: str) -> None:
-        self.scenario = scenario
+    @classmethod
+    def create(cls, spark, scenario: str):
+        from pyspark.sql.streaming import StreamingQueryListener
 
-    def onQueryProgress(self, event) -> None:
-        """Chamado ao fim de cada micro-batch."""
-        progress = event.progress
-        try:
-            input_rows_per_second.labels(scenario=self.scenario).set(
-                progress.inputRowsPerSecond or 0.0
-            )
-            processed_rows_per_second.labels(scenario=self.scenario).set(
-                progress.processedRowsPerSecond or 0.0
-            )
-            batch_duration_ms.labels(scenario=self.scenario).set(
-                progress.durationMs.get("triggerExecution", 0) or 0
-            )
-            push_to_gateway(
-                PUSHGATEWAY_URL,
-                job="3w_spark_pipeline",
-                registry=_registry,
-                grouping_key={"scenario": self.scenario},
-            )
-        except Exception as exc:
-            logger.warning("erro_push_gateway", error=str(exc))
+        class _Listener(StreamingQueryListener):
+            def onQueryStarted(self, event):
+                pass
+
+            def onQueryProgress(self, event):
+                progress = event.progress
+                try:
+                    input_rows_per_second.labels(scenario=scenario).set(
+                        progress.inputRowsPerSecond or 0.0
+                    )
+                    processed_rows_per_second.labels(scenario=scenario).set(
+                        progress.processedRowsPerSecond or 0.0
+                    )
+                    batch_duration_ms.labels(scenario=scenario).set(
+                        progress.durationMs.get("triggerExecution", 0) or 0
+                    )
+                    push_to_gateway(
+                        PUSHGATEWAY_URL,
+                        job="3w_spark_pipeline",
+                        registry=_registry,
+                        grouping_key={"scenario": scenario},
+                    )
+                except Exception as exc:
+                    logger.warning("erro_push_gateway", error=str(exc))
+
+            def onQueryTerminated(self, event):
+                pass
+
+        return _Listener()
 
 
 def main() -> None:
@@ -143,7 +153,7 @@ def main() -> None:
     spark.sparkContext.setLogLevel("WARN")
 
     # Registrar listener de métricas
-    spark.streams.addListener(_MetricsListener(scenario=args.scenario))
+    spark.streams.addListener(_MetricsListener.create(spark, scenario=args.scenario))
 
     # -----------------------------------------------------------------------
     # Pipeline de streaming
@@ -183,22 +193,22 @@ def main() -> None:
     )
 
     # Timeout opcional
-    if args.duration > 0:
-        try:
+    try:
+        if args.duration > 0:
             query.awaitTermination(timeout=args.duration)
-        except Exception:
-            pass
-        finally:
             query.stop()
             logger.info("pipeline_encerrado_por_duracao", duration_s=args.duration)
-    else:
-        try:
+        else:
             query.awaitTermination()
-        except KeyboardInterrupt:
-            logger.info("pipeline_interrompido_pelo_usuario")
-            query.stop()
-
-    spark.stop()
+    except KeyboardInterrupt:
+        logger.info("pipeline_interrompido_pelo_usuario")
+        query.stop()
+    except Exception as exc:
+        logger.error("query_falhou", error=str(exc))
+        if query.exception():
+            logger.error("query_exception", detail=str(query.exception()))
+    finally:
+        spark.stop()
 
 
 if __name__ == "__main__":
