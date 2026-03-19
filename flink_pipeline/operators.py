@@ -6,10 +6,53 @@ por poço e calcula features simples (mean, std) para simular workload de
 Digital Twin sem implementar detecção de anomalias real.
 """
 import math
+import os
+import threading
 import time
 from typing import Iterator
 
+from prometheus_client import CollectorRegistry, Histogram, push_to_gateway as _push_to_gateway
 from pyflink.datastream import KeyedProcessFunction, RuntimeContext
+
+# ---------------------------------------------------------------------------
+# Métricas Prometheus — módulo global (compartilhado entre threads em local mode)
+# ---------------------------------------------------------------------------
+_registry = CollectorRegistry()
+_e2e_latency_histogram = Histogram(
+    "benchmark_3w_flink_e2e_latency_ms",
+    "Latência E2E do pipeline Flink (ms)",
+    ["scenario"],
+    buckets=[50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000],
+    registry=_registry,
+)
+
+_PUSHGATEWAY_URL: str = os.getenv("PUSHGATEWAY_URL", "http://localhost:9091")
+_SCENARIO: str = os.getenv("BENCHMARK_SCENARIO", "baseline_1x")
+_PUSH_INTERVAL: float = 5.0
+_push_lock = threading.Lock()
+_last_push: list[float] = [0.0]
+
+
+def _maybe_push_metrics() -> None:
+    """Publica métricas no Pushgateway no máximo a cada _PUSH_INTERVAL segundos."""
+    now = time.time()
+    if now - _last_push[0] < _PUSH_INTERVAL:
+        return
+    if not _push_lock.acquire(blocking=False):
+        return
+    try:
+        if time.time() - _last_push[0] >= _PUSH_INTERVAL:
+            _push_to_gateway(
+                _PUSHGATEWAY_URL,
+                job="3w_flink_pipeline",
+                registry=_registry,
+                grouping_key={"scenario": _SCENARIO},
+            )
+            _last_push[0] = time.time()
+    except Exception:
+        pass
+    finally:
+        _push_lock.release()
 from pyflink.datastream.state import ListStateDescriptor, ValueStateDescriptor
 from pyflink.datastream.timerservice import TimerService
 from pyflink.common.typeinfo import Types
@@ -116,7 +159,11 @@ class WellStreamOperator(KeyedProcessFunction):
         ctx.timer_service().register_event_time_timer(timer_ts)
         self._last_event_ts.update(ctx.timestamp())
 
-        # 5. Emitir resultado
+        # 5. Registrar latência no Prometheus e publicar periodicamente
+        _e2e_latency_histogram.labels(scenario=_SCENARIO).observe(float(e2e_latency_ms))
+        _maybe_push_metrics()
+
+        # 6. Emitir resultado
         yield {
             "well_id":          value.get("well_id"),
             "event_code":       value.get("event_code"),

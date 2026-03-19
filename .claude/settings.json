@@ -8,7 +8,24 @@
       "Bash(docker run:*)",
       "Bash(curl -s http://localhost:3001/api/health 2)",
       "Bash(1 docker:*)",
-      "Bash(curl -s http://localhost:3001/api/health)"
+      "Bash(curl -s http://localhost:3001/api/health)",
+      "Bash(docker restart:*)",
+      "Bash(docker volume:*)",
+      "Bash(KAFKA_BROKERS=localhost:9092 timeout 15 python3 -c \":*)",
+      "Bash(ls .venv/bin/python*)",
+      "Bash(KAFKA_BROKERS=localhost:9092 .venv/bin/python -m flink_pipeline.pipeline --parallelism 4)",
+      "Bash(python3 -c \":*)",
+      "Bash(pkill -f \"producer.producer\")",
+      "Bash(pkill -f \"flink_pipeline.pipeline\")",
+      "Bash(KAFKA_BROKERS=localhost:19092,localhost:19093,localhost:19094 .venv/bin/python -m producer.producer --speed-factor 1.0 --max-wells 10 --dataset-path /home/jonathan/3W/dataset)",
+      "Bash(KAFKA_BROKERS=localhost:19092,localhost:19093,localhost:19094 .venv/bin/python -m flink_pipeline.pipeline --parallelism 4)",
+      "Bash(find flink_pipeline/__pycache__ producer/__pycache__ -delete)",
+      "Bash(curl -s \"http://localhost:9090/api/v1/query?query=benchmark_3w_flink_e2e_latency_ms_count\")",
+      "Bash(find flink_pipeline/__pycache__ -delete)"
+    ],
+    "additionalDirectories": [
+      "/tmp/spark-checkpoints",
+      "/tmp"
     ]
   }
 }

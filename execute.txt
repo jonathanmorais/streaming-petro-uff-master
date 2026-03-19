@@ -1,0 +1,23 @@
+cd /home/jonathan/streaming-petro-uff-master
+
+docker exec benchmark3w-kafka-1 kafka-topics --delete --bootstrap-server kafka-1:9092 --topic 3w-sensors 2>/dev/null; \
+docker exec benchmark3w-kafka-1 kafka-topics --delete --bootstrap-server kafka-1:9092 --topic 3w-results 2>/dev/null; \
+sleep 2; \
+docker exec benchmark3w-kafka-1 kafka-topics --create --bootstrap-server kafka-1:9092 --topic 3w-sensors --partitions 8 --replication-factor 3; \
+docker exec benchmark3w-kafka-1 kafka-topics --create --bootstrap-server kafka-1:9092 --topic 3w-results --partitions 8 --replication-factor 3
+
+
+cd /home/jonathan/streaming-petro-uff-master
+
+python -m producer.producer \
+  --speed-factor 1.0 \
+  --max-wells 10 \
+  --dataset-path /home/jonathan/3W/dataset
+
+
+cd /home/jonathan/streaming-petro-uff-master
+
+python -m producer.producer \
+  --speed-factor 1.0 \
+  --max-wells 10 \
+  --dataset-path /home/jonathan/3W/dataset

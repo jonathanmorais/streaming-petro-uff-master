@@ -51,7 +51,8 @@ def build_pipeline(parallelism: int) -> None:
     Args:
         parallelism: Grau de paralelismo do job.
     """
-    from pyflink.common import WatermarkStrategy, Duration, SimpleStringSchema
+    import os
+    from pyflink.common import WatermarkStrategy, Duration, SimpleStringSchema, Configuration
     from pyflink.common.typeinfo import Types
     from pyflink.datastream import StreamExecutionEnvironment
     from pyflink.datastream.connectors.kafka import (
@@ -63,19 +64,19 @@ def build_pipeline(parallelism: int) -> None:
     from pyflink.datastream.formats.json import JsonRowDeserializationSchema
 
     # -----------------------------------------------------------------------
-    # 1. Criar ambiente de execução
+    # 1. Criar ambiente de execução com JAR configurado antes da inicialização
     # -----------------------------------------------------------------------
-    import os
-    env = StreamExecutionEnvironment.get_execution_environment()
-    env.set_parallelism(parallelism)
-
-    # Adicionar JAR do conector Kafka explicitamente
     pyflink_lib = os.path.join(
         os.path.dirname(__import__("pyflink").__file__), "lib"
     )
     kafka_jar = os.path.join(pyflink_lib, "flink-sql-connector-kafka-3.1.0-1.18.jar")
+
+    config = Configuration()
     if os.path.exists(kafka_jar):
-        env.add_jars(f"file://{kafka_jar}")
+        config.set_string("pipeline.jars", f"file://{kafka_jar}")
+
+    env = StreamExecutionEnvironment.get_execution_environment(config)
+    env.set_parallelism(parallelism)
 
     # Aplicar configurações do Flink
     cfg = env.get_config()
