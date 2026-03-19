@@ -1,0 +1,10 @@
+# Dependências para o benchmark simplificado
+# Já devem estar instaladas via requirements.txt raiz:
+#   apache-flink>=1.18.0
+#   pyspark>=3.5.0
+#   pandas>=2.1.0
+#   pyarrow>=14.0.0
+#   numpy>=1.26.0
+
+# Adicional necessário apenas aqui:
+matplotlib>=3.8.0

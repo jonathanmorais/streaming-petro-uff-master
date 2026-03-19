@@ -9,7 +9,7 @@ docker exec benchmark3w-kafka-1 kafka-topics --create --bootstrap-server kafka-1
 
 cd /home/jonathan/streaming-petro-uff-master
 
-python -m producer.producer \
+python3 -m producer.producer \
   --speed-factor 1.0 \
   --max-wells 10 \
   --dataset-path /home/jonathan/3W/dataset
