@@ -51,19 +51,19 @@ logger = structlog.get_logger(__name__)
 _registry = CollectorRegistry()
 
 messages_total = Counter(
-    "3w_producer_messages_total",
+    "benchmark_3w_producer_messages_total",
     "Total de mensagens publicadas no Kafka",
     ["well_id", "event_code", "source"],
     registry=_registry,
 )
 messages_per_second = Gauge(
-    "3w_producer_messages_per_second",
+    "benchmark_3w_producer_messages_per_second",
     "Taxa atual de publicação de mensagens",
     ["scenario"],
     registry=_registry,
 )
 kafka_errors_total = Counter(
-    "3w_producer_kafka_errors_total",
+    "benchmark_3w_producer_kafka_errors_total",
     "Total de erros de publicação Kafka",
     registry=_registry,
 )
@@ -80,7 +80,7 @@ def _build_kafka_producer(config: dict) -> KafkaProducer:
         bootstrap_servers=config["bootstrap_servers"],
         value_serializer=_json_serializer,
         key_serializer=lambda k: k if isinstance(k, bytes) else k.encode("utf-8"),
-        acks=config.get("acks", "1"),
+        acks=int(config.get("acks", 1)),
         compression_type=config.get("compression_type", "lz4"),
         batch_size=config.get("batch_size", 16384),
         linger_ms=config.get("linger_ms", 5),

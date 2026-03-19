@@ -41,8 +41,8 @@ DEFAULT_PROMETHEUS_METRICS: list[str] = [
     # Kafka exporter
     "kafka_consumergroup_lag",
     # Producer
-    "3w_producer_messages_total",
-    "3w_producer_messages_per_second",
+    "benchmark_3w_producer_messages_total",
+    "benchmark_3w_producer_messages_per_second",
 ]
 
 

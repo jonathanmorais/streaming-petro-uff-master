@@ -13,8 +13,8 @@ from typing import List
 PRODUCER_CONFIG: dict = {
     "bootstrap_servers": os.getenv("KAFKA_BROKERS", "localhost:9092"),
     "topic": os.getenv("KAFKA_TOPIC", "3w-sensors"),
-    "acks": "1",                                    # balanço latência/durabilidade
-    "compression_type": "lz4",                     # compressão eficiente para JSON numérico
+    "acks": 1,                                      # balanço latência/durabilidade
+    "compression_type": "gzip",                    # gzip não requer lib externa (lz4 requer pip install lz4)
     "batch_size": 16384,                            # 16 KB
     "linger_ms": 5,                                 # aguarda 5 ms para batching
     "max_in_flight_requests_per_connection": 5,

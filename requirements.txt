@@ -22,7 +22,8 @@
 # -----------------------------------------------------------------------------
 
 # Cliente Kafka Python: producer, consumer, AdminClient
-kafka-python>=2.0.2
+# kafka-python-ng é fork compatível com Python 3.10+ (kafka-python tem bug com async)
+kafka-python-ng>=2.2.0
 
 # -----------------------------------------------------------------------------
 # Stream Processing Engines
