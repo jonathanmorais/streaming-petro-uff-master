@@ -105,15 +105,8 @@ def build_pipeline(parallelism: int) -> None:
         .build()
     )
 
-    watermark_strategy = (
-        WatermarkStrategy.for_bounded_out_of_orderness(
-            Duration.of_seconds(WATERMARK_MAX_OUT_OF_ORDER_SECONDS)
-        )
-        .with_timestamp_assigner(
-            # Extrai timestamp_ms do JSON como event-time
-            lambda event, _: _extract_timestamp_ms(event)
-        )
-    )
+    # Usar ingestion-time (sem Python callback) para evitar bloqueio na UDF
+    watermark_strategy = WatermarkStrategy.for_monotonous_timestamps()
 
     # -----------------------------------------------------------------------
     # 3. Stream principal
@@ -130,7 +123,7 @@ def build_pipeline(parallelism: int) -> None:
         )
         .filter(lambda msg: msg is not None)
         .key_by(lambda msg: msg.get("well_id", "unknown"))
-        .process(WellStreamOperator())
+        .process(WellStreamOperator(), output_type=Types.PICKLED_BYTE_ARRAY())
         .map(
             lambda result: json.dumps(result, default=str),
             output_type=Types.STRING(),
@@ -149,8 +142,7 @@ def build_pipeline(parallelism: int) -> None:
             .set_value_serialization_schema(SimpleStringSchema())
             .build()
         )
-        .set_delivery_guarantee(DeliveryGuarantee.EXACTLY_ONCE)
-        .set_transactional_id_prefix("flink-3w-")
+        .set_delivery_guarantee(DeliveryGuarantee.AT_LEAST_ONCE)
         .build()
     )
 

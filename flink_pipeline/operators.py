@@ -45,7 +45,7 @@ class WellStreamOperator(KeyedProcessFunction):
         self._window_state = runtime_context.get_list_state(
             ListStateDescriptor(
                 "observation_window",
-                Types.MAP(Types.STRING(), Types.FLOAT()),
+                Types.PICKLED_BYTE_ARRAY(),
             )
         )
         # Contador de eventos anômalos (class != 0)
@@ -77,7 +77,14 @@ class WellStreamOperator(KeyedProcessFunction):
         e2e_latency_ms = consumer_ts_ms - producer_ts_ms
 
         # 1. Atualizar janela deslizante
-        obs = {k: value.get(k) for k in self.FEATURE_VARS}
+        obs = {}
+        for k in self.FEATURE_VARS:
+            v = value.get(k)
+            if v is not None:
+                try:
+                    obs[k] = float(v)
+                except (TypeError, ValueError):
+                    pass
         current_window = list(self._window_state.get() or [])
         current_window.append(obs)
 
@@ -98,8 +105,8 @@ class WellStreamOperator(KeyedProcessFunction):
         features = {}
         for var in self.FEATURE_VARS:
             vals = [
-                obs[var] for obs in current_window
-                if obs.get(var) is not None and not math.isnan(float(obs[var] or "nan"))
+                float(obs[var]) for obs in current_window
+                if obs.get(var) is not None
             ]
             features[f"{var}_mean"] = self._safe_mean(vals)
             features[f"{var}_std"] = self._safe_std(vals)

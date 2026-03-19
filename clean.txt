@@ -1,0 +1,11 @@
+# 1. Limpe os tópicos
+docker exec benchmark3w-kafka-1 kafka-topics --delete --bootstrap-server kafka-1:9092 --topic 3w-sensors
+docker exec benchmark3w-kafka-1 kafka-topics --delete --bootstrap-server kafka-1:9092 --topic 3w-results
+
+# 2. Recrie
+docker exec benchmark3w-kafka-1 kafka-topics --create --bootstrap-server kafka-1:9092 --topic 3w-sensors --partitions 8 --replication-factor 3
+docker exec benchmark3w-kafka-1 kafka-topics --create --bootstrap-server kafka-1:9092 --topic 3w-results --partitions 8 --replication-factor 3
+
+# 3. Limpe o checkpoint do Spark
+rm -rf /tmp/spark-checkpoints/3w-pipeline
+
