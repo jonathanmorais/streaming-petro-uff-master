@@ -49,6 +49,11 @@ def plot_all(metrics: dict, output_dir: Path) -> None:
         matplotlib.use("Agg")  # sem display — salva direto em arquivo
         import matplotlib.pyplot as plt
         import matplotlib.patches as mpatches
+        try:
+            import seaborn as sns
+            sns.set_theme(style="whitegrid", palette="muted", font_scale=1.05)
+        except ImportError:
+            pass  # seaborn é opcional, matplotlib sozinho já funciona
     except ImportError:
         print("[ERRO] matplotlib não encontrado. Instale: pip install matplotlib")
         print("\nImprimindo métricas no terminal como alternativa:\n")

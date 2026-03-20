@@ -106,3 +106,74 @@ O Flink usa **streaming real (event-by-event)**:
 | Throughput    | Similar | Similar |
 | Sensível a recursos | Muito | Menos |
 | Ideal para    | Batch + streaming híbrido | Streaming puro |
+
+Os resultados estão corretos — o que parece estranho tem uma explicação técnica:
+
+Spark P50=P95=P99=396ms (todos iguais)
+Isso é esperado. Com trigger(once=True), o Spark processa todos os dados em um único micro-batch. Todas as janelas são emitidas ao mesmo tempo, então todas têm exatamente o mesmo processing_ts_ms. Resultado: latência uniforme de ~396ms para 100% das janelas. Não há distribuição — é um sistema batch.
+
+Flink P50=6ms, P95=19ms, P99=6760ms (variando)
+Flink processa registro por registro. Os primeiros registros são processados rapidamente (6ms), os últimos esperam a fila inteira (6760ms). Por isso há alta variância no tail.
+
+O que o gráfico está mostrando corretamente é:
+
+Spark	Flink
+Modelo	Micro-batch (processamento em lote)	True streaming (registro a registro)
+Latência mediana	396ms	6ms
+Latência P99	396ms (previsível)	6760ms (cauda longa)
+Throughput	~54K rec/s	~326 rec/s
+Spark: alta throughput, latência uniforme mas alta (~400ms)
+
+Flink: baixa latência mediana, mas cauda longa enorme por ser Python puro sem paralelismo real
+
+Esse é o trade-off clássico entre os dois sistemas. Os resultados fazem sentido para um ambiente local sem cluster.
+
+---
+
+# 🔄 Evolução do benchmark no notebook (dataset 3W, Colab Pro)
+
+## Iteração 1 — PyFlink DataStream API (Python puro)
+
+| Métrica | Spark | Flink |
+|---|---|---|
+| Throughput | ~54K rec/s | ~326 rec/s |
+| Latência P50 | ~0ms (negativa por bug) | 6ms |
+| Latência P99 | ~0ms | 31.542ms |
+
+**Problema:** PyFlink DataStream processa cada registro cruzando a barreira JVM↔Python individualmente. Resultado: ~165x mais lento que Spark.
+
+---
+
+## Iteração 2 — PyFlink Table API + `from_pandas()`
+
+| Métrica | Spark | Flink |
+|---|---|---|
+| Throughput | ~44K rec/s | ~7K rec/s |
+| Latência P50/P95/P99 | 631ms (uniforme) | 14.229ms (uniforme) |
+| Tempo total | 2.3s | 13.9s |
+
+**Melhoria:** Table API compila SQL para bytecode Java — sem loop Python por registro.
+**Problema remanescente:** `from_pandas()` copia 100K linhas do Python para a JVM antes de executar. Ainda é o gargalo principal.
+
+---
+
+## Iteração 3 — PyFlink Table API + FileSystem connector (parquet)
+
+Flink lê parquet diretamente do disco via conector nativo da JVM, mesmo mecanismo usado pelo Spark.
+Elimina a serialização Python↔JVM dos dados de entrada.
+
+**Por que a latência ainda aparece uniforme (P50=P95=P99)?**
+Limitação do design batch: num benchmark sem Kafka, todos os resultados saem ao mesmo tempo. Para latência real por janela seria necessário true streaming com Kafka.
+
+---
+
+## 🧩 Lições aprendidas
+
+| Gargalo | Causa | Fix aplicado |
+|---|---|---|
+| Flink 165x mais lento | DataStream Python loop | Migrar para Table API SQL |
+| Flink 6x mais lento | `from_pandas()` serialização | FileSystem connector + parquet |
+| Spark latência negativa | `unix_timestamp()` precisão de 1s | `current_timestamp()` com ms |
+| Spark sem latência no gráfico | `trigger(once=True)` append mode | `outputMode("update")` |
+| Spark quebrava com parquet | Coluna `timestamp` com NANOS | Drop antes de escrever chunks |
+| RAPIDS incompatível | Spark 3.5.8, RAPIDS só até 3.5.2 | RAPIDS removido, Spark roda em CPU |

@@ -1,10 +1,91 @@
-# Dependências para o benchmark simplificado
-# Já devem estar instaladas via requirements.txt raiz:
-#   apache-flink>=1.18.0
-#   pyspark>=3.5.0
-#   pandas>=2.1.0
-#   pyarrow>=14.0.0
-#   numpy>=1.26.0
+# =============================================================================
+# benchmark_simple — Dependências completas
+# =============================================================================
+# Instale com:
+#   pip install -r benchmark_simple/requirements.txt
+#
+# Para GPU, leia as seções específicas abaixo.
+# =============================================================================
 
-# Adicional necessário apenas aqui:
+# -----------------------------------------------------------------------------
+# [1] Core — processamento de dados
+# -----------------------------------------------------------------------------
+pandas>=2.1.0
+numpy>=1.24.0
+pyarrow>=14.0.0          # leitura de parquet
+
+# -----------------------------------------------------------------------------
+# [2] Engines de streaming
+# -----------------------------------------------------------------------------
+pyspark>=3.5.0            # Spark Structured Streaming
+apache-flink>=1.18.0      # PyFlink DataStream API
+
+# -----------------------------------------------------------------------------
+# [3] Visualização
+# -----------------------------------------------------------------------------
 matplotlib>=3.8.0
+seaborn>=0.13.0           # paletas e temas (usado em plot.py)
+
+# -----------------------------------------------------------------------------
+# [4] GPU — cuDF (substituição de pandas na GPU)
+# -----------------------------------------------------------------------------
+# cuDF acelera a leitura de parquet e manipulação de DataFrames na GPU.
+# Substitua o sufixo pelo CUDA instalado na máquina:
+#
+#   CUDA 11.x:
+#     pip install cudf-cu11 --extra-index-url=https://pypi.nvidia.com
+#
+#   CUDA 12.x (recomendado):
+#     pip install cudf-cu12 --extra-index-url=https://pypi.nvidia.com
+#
+# Verificar versão do CUDA: nvcc --version  ou  nvidia-smi
+#
+# Descomente a linha correspondente ao seu ambiente:
+# cudf-cu11; python_version>="3.9" and python_version<"3.12"
+# cudf-cu12; python_version>="3.9" and python_version<"3.12"
+
+# -----------------------------------------------------------------------------
+# [5] GPU — CuPy (NumPy na GPU, usado nos operadores Flink)
+# -----------------------------------------------------------------------------
+# CuPy provê uma API idêntica ao NumPy mas executa na GPU via CUDA.
+# Escolha o pacote correto para sua versão de CUDA:
+#
+#   CUDA 11.x:  pip install cupy-cuda11x
+#   CUDA 12.x:  pip install cupy-cuda12x   ← mais comum em GPUs modernas
+#
+# Após instalar: python -c "import cupy; cupy.array([1]); print('CuPy OK')"
+#
+# Descomente a linha correspondente:
+# cupy-cuda11x
+# cupy-cuda12x
+
+# -----------------------------------------------------------------------------
+# [6] GPU — RAPIDS Accelerator para Spark (opcional, aceleração SQL/shuffle)
+# -----------------------------------------------------------------------------
+# O RAPIDS plugin redireciona operações SQL do Spark para a GPU sem
+# mudanças no código. Requer:
+#   - GPU NVIDIA com compute capability ≥ 7.0 (Volta+)
+#   - CUDA 11.x ou 12.x
+#   - Spark 3.5.x (Scala 2.12) ou Spark 4.x (Scala 2.13)
+#
+# Download do JAR:
+#
+#   Spark 3.5 + CUDA 12:
+#     wget https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.12/24.10.0/rapids-4-spark_2.12-24.10.0.jar \
+#          -O benchmark_simple/rapids-4-spark.jar
+#
+#   Spark 4.x + CUDA 12:
+#     wget https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.13/25.02.0/rapids-4-spark_2.13-25.02.0.jar \
+#          -O benchmark_simple/rapids-4-spark.jar
+#
+# Ou deixe o script baixar automaticamente via Maven ao rodar com --gpu.
+# O caminho padrão esperado é: benchmark_simple/rapids-4-spark.jar
+# Pode ser sobrescrito com: export RAPIDS_JAR_PATH=/caminho/para/o.jar
+#
+# Documentação: https://nvidia.github.io/spark-rapids/
+
+# -----------------------------------------------------------------------------
+# [7] Utilitários
+# -----------------------------------------------------------------------------
+python-dotenv>=1.0.0      # carrega variáveis do .env (DATASET_PATH, etc.)
+rich>=13.7.0              # tabelas formatadas no terminal
