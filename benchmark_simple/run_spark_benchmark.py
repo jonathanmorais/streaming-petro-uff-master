@@ -57,16 +57,11 @@ SENSOR_COLS = [
 def build_spark():
     from pyspark.sql import SparkSession
 
+    # Em cluster mode no EKS, S3A e credenciais vêm do sparkConf do Operator.
+    # Só definimos o que não está no YAML.
     return (
         SparkSession.builder
         .appName("3W-Benchmark-Spark")
-        .config("spark.sql.shuffle.partitions", "8")
-        # S3A via IRSA (credenciais injetadas pelo IRSA/WebIdentity no EKS)
-        .config("spark.hadoop.fs.s3a.aws.credentials.provider",
-                "com.amazonaws.auth.WebIdentityTokenFileCredentialsProvider")
-        .config("spark.hadoop.fs.s3a.impl",
-                "org.apache.hadoop.fs.s3a.S3AFileSystem")
-        # Checkpointing no S3
         .config("spark.sql.streaming.checkpointLocation",
                 f"{OUTPUT_PATH}/_checkpoint")
         .getOrCreate()

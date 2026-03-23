@@ -7,7 +7,7 @@ spec:
   type: Python
   pythonVersion: "3"
   mode: cluster
-  image: 428655986332.dkr.ecr.us-east-1.amazonaws.com/spark-benchmark:latest
+  image: <account_id>.dkr.ecr.us-east-1.amazonaws.com/spark-benchmark:latest
   imagePullPolicy: Always
   mainApplicationFile: "local:///opt/spark/scripts/run_spark_benchmark.py"
   sparkVersion: "3.5.3"
@@ -17,22 +17,14 @@ spec:
     cores: 2
     memory: "4g"
     serviceAccount: spark      # tem a IAM role com acesso S3 via IRSA
-    env:
-      - name: DATASET_PATH
-        value: "s3a://streaming-3w/3w/dataset"
-      - name: OUTPUT_PATH
-        value: "s3a://streaming-3w/results/spark"
   executor:
     cores: 2
     instances: 2
     memory: "4g"
-    env:
-      - name: DATASET_PATH
-        value: "s3a://streaming-3w/3w/dataset"
-      - name: OUTPUT_PATH
-        value: "s3a://streaming-3w/results/spark"
   sparkConf:
     "spark.jars.ivy": "/tmp/.ivy"
     "spark.sql.shuffle.partitions": "8"
-    "spark.hadoop.fs.s3a.aws.credentials.provider": "com.amazonaws.auth.WebIdentityTokenFileCredentialsProvider"
+    "spark.hadoop.fs.s3a.aws.credentials.provider": "com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
     "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem"
+    "spark.kubernetes.driverEnv.DATASET_PATH": "s3a://streaming-3w/3w/dataset"
+    "spark.kubernetes.driverEnv.OUTPUT_PATH": "s3a://streaming-3w/results/spark"
