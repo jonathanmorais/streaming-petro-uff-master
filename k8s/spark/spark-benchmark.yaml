@@ -1,13 +1,13 @@
 apiVersion: sparkoperator.k8s.io/v1beta2
 kind: SparkApplication
 metadata:
-  name: 3w-spark-benchmark
+  name: benchmark-3w-spark
   namespace: spark
 spec:
   type: Python
   pythonVersion: "3"
   mode: cluster
-  image: <account_id>.dkr.ecr.us-east-1.amazonaws.com/spark-benchmark:latest
+  image: <ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/spark-benchmark:latest
   imagePullPolicy: Always
   mainApplicationFile: "local:///opt/spark/scripts/run_spark_benchmark.py"
   sparkVersion: "3.5.3"
@@ -18,9 +18,11 @@ spec:
     memory: "4g"
     serviceAccount: spark      # tem a IAM role com acesso S3 via IRSA
   executor:
-    cores: 2
+    cores: 2          # slots Spark (paralelismo interno)
+    coreRequest: "1200m"  # request K8s — cabe nos ~1.5 vCPU livres por node
+    coreLimit: "2000m"    # pode usar até 2 vCPU quando disponível
     instances: 2
-    memory: "4g"
+    memory: "3g"      # reduzido para caber junto com o coreRequest
   sparkConf:
     "spark.jars.ivy": "/tmp/.ivy"
     "spark.sql.shuffle.partitions": "8"
@@ -28,3 +30,4 @@ spec:
     "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem"
     "spark.kubernetes.driverEnv.DATASET_PATH": "s3a://streaming-3w/3w/dataset"
     "spark.kubernetes.driverEnv.OUTPUT_PATH": "s3a://streaming-3w/results/spark"
+    "spark.sql.parquet.nanosAsLong": "true"

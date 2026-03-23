@@ -318,6 +318,9 @@ eksctl delete cluster --name benchmark-3w --region us-east-1
 | `ClassNotFoundException: WebIdentityTokenFileCredentialsProvider` | hadoop-aws não está na imagem base; chicken-and-egg com `spark.jars.packages` | Imagem customizada com JARs pré-instalados |
 | `configMap` não suportado em `spark.kubernetes.driver.volumes` | Spark Kubernetes só suporta `emptyDir`, `hostPath`, `pvc`, `nfs` | Script embutido na imagem via Dockerfile |
 | `/nonexistent/.ivy2/cache` não existe | Usuário do container não tem home directory | `spark.jars.ivy=/tmp/.ivy` |
+| Controller não reconcilia após delete+apply | Bug no informer do v2.5.0: perde o evento CREATE quando o objeto é recriado rápido demais | `sleep 5` entre delete e apply, ou `kubectl rollout restart deployment/spark-operator-controller -n spark` |
+| `s3:ListBucket` negado mesmo com IRSA funcionando | IAM policy criada com nome de bucket placeholder (`seu-bucket-3w`) | Atualizar a policy com o nome real do bucket via `aws iam create-policy-version` |
+| `Illegal Parquet type: INT64 (TIMESTAMP(NANOS,false))` | Dataset 3W usa timestamps em nanossegundos, não suportados por padrão no Spark | Adicionar `spark.sql.parquet.nanosAsLong=true` ao `sparkConf` |
 
 ---
 

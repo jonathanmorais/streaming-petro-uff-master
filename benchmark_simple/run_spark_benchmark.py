@@ -50,6 +50,17 @@ SENSOR_COLS = [
     "P-JUS-CKP", "P-MON-CKGL", "P-JUS-CKGL", "QGL", "QBS",
 ]
 
+# Schema explícito do dataset 3W v2.
+# O índice DatetimeIndex do pandas é gravado como INT64 TIMESTAMP(NANOS) no Parquet.
+# Spark rejeita NANOS por padrão; ao fornecer LongType explicitamente
+# o Spark lê os bytes INT64 diretamente sem passar pelo conversor de tipos.
+def schema_3w():
+    from pyspark.sql.types import StructType, StructField, LongType, DoubleType
+    fields = [StructField("timestamp", LongType(), True)]
+    fields += [StructField(c, DoubleType(), True) for c in SENSOR_COLS]
+    fields += [StructField("class", DoubleType(), True)]
+    return StructType(fields)
+
 
 # ---------------------------------------------------------------------------
 # Spark Session (sem .master() — cluster mode gerenciado pelo Operator)
@@ -58,10 +69,11 @@ def build_spark():
     from pyspark.sql import SparkSession
 
     # Em cluster mode no EKS, S3A e credenciais vêm do sparkConf do Operator.
-    # Só definimos o que não está no YAML.
+    # nanosAsLong precisa ser setado na sessão para valer na inferência de schema.
     return (
         SparkSession.builder
         .appName("3W-Benchmark-Spark")
+        .config("spark.sql.parquet.nanosAsLong", "true")
         .config("spark.sql.streaming.checkpointLocation",
                 f"{OUTPUT_PATH}/_checkpoint")
         .getOrCreate()
@@ -82,15 +94,18 @@ def load_dataset_to_staging(spark) -> int:
 
     print(f"[1/3] Lendo dataset de {DATASET_PATH} ...")
 
-    # Lê todos os subdiretórios 0-9 de uma vez
-    df = spark.read.parquet(DATASET_PATH)
+    # Schema explícito evita inferência — contorna o erro TIMESTAMP(NANOS)
+    # que o Spark rejeita quando tenta converter automaticamente.
+    df = (
+        spark.read
+        .schema(schema_3w())
+        .option("recursiveFileLookup", "true")
+        .parquet(DATASET_PATH)
+    )
 
-    # Garante coluna timestamp_ms
+    # timestamp já é Long (nanosegundos) — converte para milissegundos
     if "timestamp_ms" not in df.columns:
-        df = df.withColumn(
-            "timestamp_ms",
-            (F.col("timestamp").cast("long") / 1_000).cast("long"),
-        )
+        df = df.withColumn("timestamp_ms", (F.col("timestamp") / 1_000_000).cast("long"))
 
     # Adiciona producer_ts_ms (momento de "ingestão" simulado)
     ingestion_ts = int(time.time() * 1000)

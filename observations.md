@@ -244,3 +244,105 @@ Limitação do design batch: num benchmark sem Kafka, todos os resultados saem a
 | Spark sem latência no gráfico | `trigger(once=True)` append mode | `outputMode("update")` |
 | Spark quebrava com parquet | Coluna `timestamp` com NANOS | Drop antes de escrever chunks |
 | RAPIDS incompatível | Spark 3.5.8, RAPIDS só até 3.5.2 | RAPIDS removido, Spark roda em CPU |
+
+---
+
+# ☸️ Scheduling de pods no Kubernetes: requests vs uso real
+
+## O problema
+
+Um executor pod ficou preso em `FailedScheduling` com a mensagem:
+
+```
+0/2 nodes are available: 2 Insufficient cpu.
+```
+
+Mesmo com os nodes usando menos de 10% de CPU real, o scheduler recusou o pod.
+
+## Por que isso acontece
+
+O Kubernetes **não agenda pods com base no uso real de CPU** — ele usa **requests** (reservas declaradas). Um request é uma garantia: o K8s reserva aquela quantidade no node independente de o pod estar usando ou não.
+
+```
+Node t3.xlarge: 4 vCPU ≈ 3900m allocatable
+
+  Pod driver:            request = 2000m  → reservado
+  Pod executor-1:        request = 2000m  → reservado
+  Sistema (kube-proxy,
+  coredns, operator...): request ~  450m  → reservado
+  ─────────────────────────────────────────────────
+  Total reservado:                  4450m → não cabe em 1 node
+
+  Distribuído em 2 nodes:
+    Node 1: 2250m reservados → 1750m livres
+    Node 2: 2450m reservados → 1550m livres
+
+  Novo executor pedindo 2000m → não cabe em nenhum node
+  → FailedScheduling (mesmo com uso real de ~10%)
+```
+
+É como reserva de assento em avião: o assento está "ocupado" mesmo que o passageiro esteja dormindo. O avião não redistribui assentos com base em quem está acordado.
+
+## Os três conceitos de CPU no Spark Operator
+
+| Campo | Quem usa | Significado |
+|---|---|---|
+| `cores` | Spark | Quantas tasks paralelas o executor roda. Spark não sabe nada de K8s. |
+| `coreRequest` | Kubernetes scheduler | Quanto o K8s **reserva** no node. Determina onde o pod é colocado. |
+| `coreLimit` | Kubernetes cgroups | Máximo que o pod pode usar. Se ultrapassar, é throttled. |
+
+São três camadas ortogonais. `cores: 2` não implica `coreRequest: 2000m` — são configurações independentes.
+
+## A solução
+
+Separar o paralelismo Spark do request K8s:
+
+```yaml
+executor:
+  cores: 2          # Spark usa 2 slots de execução internamente
+  coreRequest: "1200m"  # K8s reserva apenas 1.2 vCPU → cabe nos nodes
+  coreLimit: "2000m"    # pode usar até 2 vCPU quando o node estiver ocioso
+```
+
+Com `coreRequest: 1200m`, o executor cabe no Node 1 (1750m livres). Em horários de baixa utilização, o cgroup permite consumir até `coreLimit` sem precisar re-agendar.
+
+## Quando isso importa
+
+Em clusters compartilhados ou de tamanho fixo (como o benchmark com 2× t3.xlarge), ajustar `coreRequest` para o mínimo necessário é essencial. Em produção com autoscaling, o cluster aumentaria automaticamente o número de nodes — mas para um benchmark de custo controlado, o correto é dimensionar os requests para caber na capacidade existente.
+
+---
+
+# 🕐 Timestamps em nanossegundos no dataset 3W
+
+## O problema
+
+O dataset 3W armazena timestamps no formato `INT64 (TIMESTAMP(NANOS, false))` — precisão de nanossegundos sem timezone. O Spark, por padrão, rejeita esse tipo com:
+
+```
+AnalysisException: Illegal Parquet type: INT64 (TIMESTAMP(NANOS,false))
+```
+
+Isso acontece porque o Spark só suporta nativamente timestamps até microssegundos (`TIMESTAMP(MICROS)`). O tipo `NANOS` foi introduzido no Parquet para representar séries temporais de alta frequência — comum em dados industriais de sensores, como os poços offshore do 3W.
+
+## Por que isso importa em datasets industriais
+
+Sistemas SCADA e sensores de poços registram eventos em frequências de 1 Hz a 1 kHz. Em séries temporais de equipamentos críticos, a resolução nanosegundos pode distinguir eventos que aparecem simultâneos em microssegundos. O formato Parquet preserva essa precisão, mas engines de processamento distribuído como Spark foram projetados principalmente para dados de negócio (logs, transações), onde microsegundos são mais que suficientes.
+
+## A solução
+
+```yaml
+# spark-benchmark.yaml — sparkConf
+"spark.sql.parquet.nanosAsLong": "true"
+```
+
+Com essa config, o Spark lê timestamps NANOS como valores `Long` (nanossegundos desde epoch Unix) em vez de tentar converter para `TimestampType`. O dado é preservado sem perda de precisão, e o pipeline decide como interpretar o valor numérico.
+
+## Trade-off
+
+| Abordagem | Precisão | Compatibilidade Spark |
+|---|---|---|
+| `nanosAsLong=true` | Nanosegundos (total) | Funciona — timestamp vira `Long` |
+| `nanosAsLong=false` (padrão) | — | Falha com `IllegalParquetType` |
+| Pré-processar para microssegundos | Microssegundos (perde 1000x) | Funciona nativamente |
+
+Para o benchmark 3W, `nanosAsLong=true` é a escolha correta: preserva o dado original e o pipeline converte para timestamp de evento via divisão (`/ 1_000` para microssegundos, ou `/ 1_000_000` para milissegundos conforme necessário).
