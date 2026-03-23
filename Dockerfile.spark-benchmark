@@ -1,0 +1,14 @@
+FROM apache/spark:3.5.3-python3
+
+USER root
+
+# Pré-instala hadoop-aws + aws-sdk-bundle diretamente no classpath do Spark
+# Evita download em runtime via Maven (resolve o chicken-and-egg com S3)
+RUN cd /opt/spark/jars && \
+    curl -fsSL -O https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar && \
+    curl -fsSL -O https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.12.262/aws-java-sdk-bundle-1.12.262.jar
+
+# Copia o script de benchmark para dentro da imagem
+COPY benchmark_simple/run_spark_benchmark.py /opt/spark/scripts/run_spark_benchmark.py
+
+USER 185
