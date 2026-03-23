@@ -1,0 +1,33 @@
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: 3w-spark-benchmark
+  namespace: spark
+spec:
+  type: Python
+  pythonVersion: "3"
+  mode: cluster
+  image: apache/spark:3.5.3-python3
+  imagePullPolicy: IfNotPresent
+  mainApplicationFile: s3a://seu-bucket-3w/scripts/run_spark_benchmark.py
+  sparkVersion: "3.5.3"
+  restartPolicy:
+    type: Never
+  driver:
+    cores: 2
+    memory: "4g"
+    serviceAccount: spark      # tem a IAM role com acesso S3 via IRSA
+  executor:
+    cores: 2
+    instances: 2
+    memory: "4g"
+  sparkConf:
+    "spark.sql.shuffle.partitions": "8"
+    "spark.hadoop.fs.s3a.aws.credentials.provider": "com.amazonaws.auth.WebIdentityTokenFileCredentialsProvider"
+    "spark.jars.packages": "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262"
+    "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem"
+  env:
+    - name: DATASET_PATH
+      value: "s3a://seu-bucket-3w/3w/dataset"
+    - name: OUTPUT_PATH
+      value: "s3a://seu-bucket-3w/results/spark"

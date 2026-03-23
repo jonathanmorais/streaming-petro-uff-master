@@ -1,0 +1,22 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: benchmark-3w
+  region: us-east-1
+  version: "1.31"
+
+iam:
+  withOIDC: true   # necessário para IRSA (acesso S3 sem credentials hardcoded)
+
+managedNodeGroups:
+  - name: benchmark-nodes
+    instanceType: t3.xlarge   # 4 vCPU, 16GB RAM
+    minSize: 2
+    maxSize: 2
+    desiredCapacity: 2
+    volumeSize: 40
+    labels:
+      role: benchmark
+    tags:
+      project: benchmark-3w

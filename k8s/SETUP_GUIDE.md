@@ -62,32 +62,6 @@ aws s3 cp benchmark_simple/run_spark_benchmark.py s3://seu-bucket-3w/scripts/
 ## Parte 2: Criar o cluster EKS
 
 ```bash
-# cluster.yaml
-cat > k8s/cluster.yaml << 'EOF'
-apiVersion: eksctl.io/v1alpha5
-kind: ClusterConfig
-
-metadata:
-  name: benchmark-3w
-  region: us-east-1
-  version: "1.31"
-
-iam:
-  withOIDC: true   # necessário para IRSA (acesso S3 sem credentials hardcoded)
-
-managedNodeGroups:
-  - name: benchmark-nodes
-    instanceType: t3.xlarge   # 4 vCPU, 16GB RAM
-    minSize: 2
-    maxSize: 2
-    desiredCapacity: 2
-    volumeSize: 40
-    labels:
-      role: benchmark
-    tags:
-      project: benchmark-3w
-EOF
-
 eksctl create cluster -f k8s/cluster.yaml
 # Leva ~15 min
 
@@ -155,43 +129,6 @@ kubectl get pods -n spark
 ---
 
 ## Parte 5: SparkApplication — benchmark 3W
-
-```yaml
-# k8s/spark/spark-benchmark.yaml
-apiVersion: sparkoperator.k8s.io/v1beta2
-kind: SparkApplication
-metadata:
-  name: 3w-spark-benchmark
-  namespace: spark
-spec:
-  type: Python
-  pythonVersion: "3"
-  mode: cluster
-  image: apache/spark:3.5.3-python3
-  imagePullPolicy: IfNotPresent
-  mainApplicationFile: s3a://seu-bucket-3w/scripts/run_spark_benchmark.py
-  sparkVersion: "3.5.3"
-  restartPolicy:
-    type: Never
-  driver:
-    cores: 2
-    memory: "4g"
-    serviceAccount: spark      # tem a IAM role com acesso S3 via IRSA
-  executor:
-    cores: 2
-    instances: 2
-    memory: "4g"
-  sparkConf:
-    "spark.sql.shuffle.partitions": "8"
-    "spark.hadoop.fs.s3a.aws.credentials.provider": "com.amazonaws.auth.WebIdentityTokenFileCredentialsProvider"
-    "spark.jars.packages": "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262"
-    "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem"
-  env:
-    - name: DATASET_PATH
-      value: "s3a://seu-bucket-3w/3w/dataset"
-    - name: OUTPUT_PATH
-      value: "s3a://seu-bucket-3w/results/spark"
-```
 
 ```bash
 kubectl apply -f k8s/spark/spark-benchmark.yaml
