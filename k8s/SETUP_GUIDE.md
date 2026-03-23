@@ -137,10 +137,10 @@ kubectl apply -f k8s/spark/spark-benchmark.yaml
 kubectl get sparkapplication -n spark -w
 
 # Logs do driver
-kubectl logs -f -l spark-role=driver -n spark
+kubectl logs -f 3w-spark-benchmark-driver -n spark
 
 # Spark UI (enquanto roda)
-kubectl port-forward -l spark-role=driver 4040:4040 -n spark
+kubectl port-forward pod/3w-spark-benchmark-driver 4040:4040 -n spark
 # http://localhost:4040
 ```
 

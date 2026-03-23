@@ -89,3 +89,4 @@ seaborn>=0.13.0           # paletas e temas (usado em plot.py)
 # -----------------------------------------------------------------------------
 python-dotenv>=1.0.0      # carrega variáveis do .env (DATASET_PATH, etc.)
 rich>=13.7.0              # tabelas formatadas no terminal
+grpcio-tools>=1.62.0      # compila .proto → _pb2.py (benchmark I/O Protobuf)

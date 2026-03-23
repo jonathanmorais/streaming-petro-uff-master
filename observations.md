@@ -130,6 +130,73 @@ Esse é o trade-off clássico entre os dois sistemas. Os resultados fazem sentid
 
 ---
 
+# ☸️ Arquitetura: Spark Operator no EKS
+
+## Como o script roda no cluster
+
+```
+kubectl apply -f k8s/spark/spark-benchmark.yaml
+          │
+          ▼
+    Spark Operator (controller)
+          │ cria e gerencia
+    ┌─────┴────────────────────────────────────────────┐
+    │  Driver Pod  (roda run_spark_benchmark.py)        │
+    │  - lê dataset do S3 com Spark (não pandas)       │
+    │  - grava staging no S3                           │
+    │  - coordena os executors                         │
+    │  - coleta métricas após awaitTermination()       │
+    └──────────────────┬───────────────────────────────┘
+                       │ spawna
+              ┌────────┴────────┐
+              │  Executor Pod 1 │   processa partições do staging
+              │  Executor Pod 2 │   processa partições do staging
+              └─────────────────┘
+                       │ lê/escreve
+                       ▼
+              S3: s3://bucket/3w/
+              ├── dataset/         ← parquets de entrada (read-only)
+              └── results/spark/
+                  ├── _staging/    ← dados amostrados para o streaming ler
+                  ├── stream_results/  ← output das janelas de 60s
+                  ├── metrics_raw/ ← JSON com throughput e latências
+                  └── _checkpoint/ ← checkpoint do Structured Streaming
+```
+
+## Por que não usar `.master("local[*]")`
+
+O `run.py` original usa `SparkSession.builder.master("local[*]")`, que faz o Spark
+rodar tudo em um único processo (o driver). Os executor pods criados pelo Operator
+ficam ociosos. No `run_spark_benchmark.py`, o `.master()` é omitido — o Operator
+injeta automaticamente `spark://driver-svc:7077` via `spark-submit`.
+
+## Fluxo de execução (3 fases)
+
+| Fase | O que acontece | Onde |
+|------|---------------|------|
+| 1. Staging | Spark lê parquets do S3, amostra MAX_ROWS, grava em `_staging/` | Driver + Executors |
+| 2. Streaming | `readStream` lê `_staging/`, agrega janelas de 60s, `trigger(once=True)` | Driver + Executors |
+| 3. Métricas | Driver coleta `lastProgress`, calcula p50/p95/p99, salva JSON no S3 | Driver |
+
+## Diferença local vs cluster
+
+| Aspecto | `run.py` (local) | `run_spark_benchmark.py` (EKS) |
+|---------|-----------------|-------------------------------|
+| Master | `local[*]` (1 processo) | cluster (driver + N executors) |
+| Dataset | pandas → tmpdir local | Spark → S3 staging |
+| Output | `./results/` local | `s3a://bucket/results/spark/` |
+| Credenciais S3 | N/A | IRSA (WebIdentityTokenFile) |
+| Escalabilidade | 1 máquina | adicionar `executor.instances` no YAML |
+
+## Credenciais S3 via IRSA (sem secrets hardcoded)
+
+O Spark Operator anota o pod do driver com a IAM Role criada pelo `eksctl create iamserviceaccount`.
+O provider `WebIdentityTokenFileCredentialsProvider` lê o token montado automaticamente em
+`/var/run/secrets/eks.amazonaws.com/serviceaccount/token` e troca por credenciais temporárias
+da AWS STS. Nenhuma `AWS_ACCESS_KEY_ID` é necessária no YAML.
+
+---
+
 # 🔄 Evolução do benchmark no notebook (dataset 3W, Colab Pro)
 
 ## Iteração 1 — PyFlink DataStream API (Python puro)
