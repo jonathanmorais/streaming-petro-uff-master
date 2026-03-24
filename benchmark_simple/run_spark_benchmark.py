@@ -42,7 +42,7 @@ if not DATASET_PATH or not OUTPUT_PATH:
 MAX_ROWS  = int(os.environ.get("MAX_ROWS", "100000"))
 MAX_FILES = int(os.environ.get("MAX_FILES", "5"))
 
-STAGING_PATH = f"{OUTPUT_PATH}/_staging"
+STAGING_PATH = f"{OUTPUT_PATH}/staging"
 RESULTS_PATH = f"{OUTPUT_PATH}/stream_results"
 
 SENSOR_COLS = [
@@ -68,67 +68,149 @@ def schema_3w():
 def build_spark():
     from pyspark.sql import SparkSession
 
-    # Em cluster mode no EKS, S3A e credenciais vêm do sparkConf do Operator.
-    # nanosAsLong precisa ser setado na sessão para valer na inferência de schema.
-    return (
-        SparkSession.builder
-        .appName("3W-Benchmark-Spark")
-        .config("spark.sql.parquet.nanosAsLong", "true")
-        .config("spark.sql.streaming.checkpointLocation",
-                f"{OUTPUT_PATH}/_checkpoint")
-        .getOrCreate()
-    )
+    # Em cluster mode, .getOrCreate() devolve a sessão já criada pelo spark-submit
+    # e ignora os .config() do builder. Usar spark.conf.set() após obter a sessão
+    # é o único modo confiável de alterar SQLConf em cluster mode.
+    spark = SparkSession.builder.appName("3W-Benchmark-Spark").getOrCreate()
+
+    # --- NANOS fix (três camadas para garantir cobertura total) ---
+    # 1. SQLConf do driver: usado na inferência de schema (driver-side).
+    spark.conf.set("spark.sql.parquet.nanosAsLong", "true")
+
+    # 2. HadoopConf do SparkContext: copiado por newHadoopConf() ao construir
+    #    o broadcast conf que os executors recebem. O leitor row-based lê
+    #    nanosAsLong diretamente deste conf (ParquetToSparkSchemaConverter(conf)).
+    spark.sparkContext._jsc.hadoopConfiguration().set(
+        "spark.sql.parquet.nanosAsLong", "true")
+
+    # 3. Força leitor row-based: o leitor vetorizado lê nanosAsLong de SQLConf.get
+    #    nos executors, que não herda a sessão do driver. O row-based lê do
+    #    HadoopConf (item 2 acima), que chega corretamente aos executors.
+    spark.conf.set("spark.sql.parquet.enableVectorizedReader", "false")
+
+    spark.conf.set("spark.sql.files.ignoreCorruptFiles", "true")
+    spark.conf.set("spark.sql.streaming.checkpointLocation",
+                   f"{OUTPUT_PATH}/_checkpoint")
+    return spark
 
 
 # ---------------------------------------------------------------------------
-# 1. Carrega dataset do S3 com Spark (substitui pandas + iteração local)
+# 1. Carrega dataset do S3 com boto3+pyarrow (bypassa o leitor Parquet do Spark)
 # ---------------------------------------------------------------------------
 def load_dataset_to_staging(spark) -> int:
     """
-    Lê os parquets do dataset 3W no S3, faz amostragem se MAX_ROWS > 0,
-    adiciona producer_ts_ms e grava em STAGING_PATH para o streaming ler.
+    Lê os parquets do dataset 3W diretamente do S3 usando boto3+pyarrow,
+    normaliza TIMESTAMP_NANOS→int64 e class INT32→float64 em Python puro,
+    converte para Spark DataFrame e grava em STAGING_PATH.
+
+    Por que boto3+pyarrow em vez de spark.read.parquet():
+      O dataset 3W contém TIMESTAMP(NANOS,false) que o Spark 3.5.3 não lê
+      nos executors — nanosAsLong=true é session-local no driver e não é
+      herdado pelos SQLConf dos executors. pyarrow lida com NANOS nativamente.
 
     Retorna o número de registros gravados.
     """
-    import pyspark.sql.functions as F
+    import io
+    import random
+    import boto3
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import pandas as pd
 
-    print(f"[1/3] Lendo dataset de {DATASET_PATH} ...")
+    print(f"[1/3] Lendo dataset de {DATASET_PATH} via boto3+pyarrow ...")
 
-    # Schema explícito evita inferência — contorna o erro TIMESTAMP(NANOS)
-    # que o Spark rejeita quando tenta converter automaticamente.
-    df = (
-        spark.read
-        .schema(schema_3w())
-        .option("recursiveFileLookup", "true")
-        .parquet(DATASET_PATH)
-    )
+    # Extrai bucket e prefix do caminho s3a://bucket/prefix
+    s3_path = DATASET_PATH.replace("s3a://", "").replace("s3://", "")
+    bucket_name = s3_path.split("/")[0]
+    prefix = "/".join(s3_path.split("/")[1:])
+    if prefix and not prefix.endswith("/"):
+        prefix += "/"
 
-    # timestamp já é Long (nanosegundos) — converte para milissegundos
-    if "timestamp_ms" not in df.columns:
-        df = df.withColumn("timestamp_ms", (F.col("timestamp") / 1_000_000).cast("long"))
+    s3 = boto3.client("s3")
 
-    # Adiciona producer_ts_ms (momento de "ingestão" simulado)
-    ingestion_ts = int(time.time() * 1000)
-    df = df.withColumn("producer_ts_ms", F.lit(ingestion_ts))
+    # Lista todos os arquivos .parquet recursivamente
+    parquet_keys: list[str] = []
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            if obj["Key"].endswith(".parquet"):
+                parquet_keys.append(obj["Key"])
 
-    # Amostragem (replica o comportamento do run.py)
-    total = df.count()
-    print(f"  Total de registros no dataset: {total:,}")
+    print(f"  Arquivos parquet encontrados: {len(parquet_keys)}")
+    if not parquet_keys:
+        print("[ERRO] Nenhum arquivo parquet encontrado em DATASET_PATH.")
+        sys.exit(1)
 
+    # Limita arquivos para evitar OOM no driver (MAX_FILES * 20 como teto)
+    if MAX_FILES > 0 and len(parquet_keys) > MAX_FILES * 20:
+        random.seed(42)
+        random.shuffle(parquet_keys)
+        parquet_keys = parquet_keys[: MAX_FILES * 20]
+        print(f"  Limitado a {len(parquet_keys)} arquivos (MAX_FILES={MAX_FILES})")
+
+    # Lê e normaliza cada arquivo com pyarrow
+    frames: list[pd.DataFrame] = []
+    errors = 0
+    for key in parquet_keys:
+        try:
+            obj = s3.get_object(Bucket=bucket_name, Key=key)
+            buf = io.BytesIO(obj["Body"].read())
+            table = pq.read_table(buf)
+
+            cols = {}
+            for field in table.schema:
+                col = table.column(field.name)
+                if field.name == "timestamp" and pa.types.is_timestamp(col.type):
+                    # TIMESTAMP_NANOS → int64 (nanosegundos)
+                    cols[field.name] = col.cast(pa.int64())
+                elif field.name == "class":
+                    # INT32 ou DOUBLE → float64 uniforme
+                    cols[field.name] = col.cast(pa.float64())
+                else:
+                    cols[field.name] = col
+
+            frames.append(pa.table(cols).to_pandas())
+        except Exception as e:
+            errors += 1
+            if errors <= 5:
+                print(f"  [WARN] Pulando {key}: {e}")
+
+    if not frames:
+        print("[ERRO] Nenhum arquivo lido com sucesso.")
+        sys.exit(1)
+
+    print(f"  Arquivos lidos: {len(frames)}  (erros ignorados: {errors})")
+
+    df_pd = pd.concat(frames, ignore_index=True)
+    total = len(df_pd)
+    print(f"  Total de registros: {total:,}")
+
+    # Amostragem
     if MAX_ROWS > 0 and total > MAX_ROWS:
-        fraction = MAX_ROWS / total
-        df = df.sample(fraction=fraction, seed=42)
-        sampled = df.count()
-        print(f"  Amostra: {sampled:,} registros ({MAX_ROWS} solicitados)")
+        df_pd = df_pd.sample(n=MAX_ROWS, random_state=42).reset_index(drop=True)
+        print(f"  Amostra: {len(df_pd):,} registros ({MAX_ROWS} solicitados)")
     else:
         print(f"  Usando todos os {total:,} registros (sem limite)")
 
-    # Grava staging no S3 (reparticionado para o streaming processar em batches)
-    n_partitions = max(1, min(20, (MAX_ROWS or total) // 5000))
-    print(f"  Gravando staging em {STAGING_PATH} ({n_partitions} partições)...")
-    df.repartition(n_partitions).write.mode("overwrite").parquet(STAGING_PATH)
+    # Adiciona colunas derivadas
+    if "timestamp_ms" not in df_pd.columns:
+        df_pd["timestamp_ms"] = (df_pd["timestamp"] // 1_000_000).astype("int64")
 
-    return df.count()
+    df_pd["producer_ts_ms"] = int(time.time() * 1000)
+
+    # Garante float64 nas colunas de sensor
+    for c in SENSOR_COLS:
+        if c in df_pd.columns:
+            df_pd[c] = df_pd[c].astype("float64")
+
+    # Converte para Spark DataFrame e grava staging no S3
+    print(f"  Convertendo para Spark e gravando em {STAGING_PATH} ...")
+    n_records = len(df_pd)
+    n_partitions = max(1, min(20, n_records // 5000))
+    spark.createDataFrame(df_pd).repartition(n_partitions).write.mode("overwrite").parquet(STAGING_PATH)
+    print(f"  Staging gravado: {n_records:,} registros em {n_partitions} partições")
+
+    return n_records
 
 
 # ---------------------------------------------------------------------------
@@ -159,8 +241,7 @@ def run_streaming(spark, total_records: int) -> dict[str, Any]:
         .withWatermark("event_time", "10 seconds")
         .groupBy(
             F.window("event_time", "60 seconds"),
-            "well_id",
-            "event_code",
+            "class",
         )
         .agg(
             F.count("*").alias("record_count"),
@@ -175,24 +256,21 @@ def run_streaming(spark, total_records: int) -> dict[str, Any]:
 
     t_start = time.time()
 
-    # Grava resultados no S3 e também em memória para coletar métricas
-    query_s3 = (
-        result_sdf.writeStream
-        .format("parquet")
-        .option("path", RESULTS_PATH)
-        .trigger(once=True)
-        .start()
-    )
-
+    # outputMode("complete"): emite todas as janelas do estado em cada batch.
+    # Necessário com trigger(once=True): em "append" mode, o watermark inicia em
+    # epoch-zero e só avança no batch seguinte — com um único batch nada é emitido.
+    # "complete" mode emite tudo independente do watermark.
+    # Nota: parquet sink não suporta "complete"; os resultados são coletados via
+    # memory sink e depois gravados no S3 como batch write.
     query_mem = (
         result_sdf.writeStream
+        .outputMode("complete")
         .format("memory")
         .queryName("spark_results")
         .trigger(once=True)
         .start()
     )
 
-    query_s3.awaitTermination(timeout=600)
     query_mem.awaitTermination(timeout=600)
 
     t_end = time.time()
@@ -202,6 +280,11 @@ def run_streaming(spark, total_records: int) -> dict[str, Any]:
     progress = query_mem.lastProgress or {}
     num_input_rows = progress.get("numInputRows", total_records)
     duration_ms = progress.get("durationMs", {})
+
+    results_df = spark.sql("SELECT * FROM spark_results")
+
+    # Grava resultados no S3 como batch write (parquet streaming não suporta complete mode)
+    results_df.write.mode("overwrite").parquet(RESULTS_PATH)
 
     results_rows = spark.sql(
         "SELECT latency_ms, record_count FROM spark_results "
@@ -244,8 +327,8 @@ def run_streaming(spark, total_records: int) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # 3. Salva métricas no S3
 # ---------------------------------------------------------------------------
-def save_metrics(spark, metrics: dict[str, Any]) -> None:
-    import pyspark.sql.functions as F
+def save_metrics(metrics: dict[str, Any]) -> None:
+    import boto3
 
     print(f"\n[3/3] Salvando métricas em {OUTPUT_PATH}/metrics.json ...")
 
@@ -254,12 +337,13 @@ def save_metrics(spark, metrics: dict[str, Any]) -> None:
 
     json_str = json.dumps(to_save, indent=2)
 
-    # Grava via Spark como arquivo de texto no S3
-    spark.sparkContext \
-        .parallelize([json_str], 1) \
-        .saveAsTextFile(f"{OUTPUT_PATH}/metrics_raw")
+    # Extrai bucket e key do caminho s3a://bucket/prefix/...
+    path = OUTPUT_PATH.replace("s3a://", "").replace("s3://", "")
+    bucket = path.split("/")[0]
+    key    = "/".join(path.split("/")[1:]) + "/metrics.json"
 
-    print("  Métricas salvas.")
+    boto3.client("s3").put_object(Bucket=bucket, Key=key, Body=json_str.encode())
+    print(f"  Métricas salvas em s3://{bucket}/{key}")
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +362,7 @@ def main() -> None:
 
     total = load_dataset_to_staging(spark)
     metrics = run_streaming(spark, total)
-    save_metrics(spark, metrics)
+    save_metrics(metrics)
 
     print("\n" + "=" * 60)
     print("  CONCLUÍDO")

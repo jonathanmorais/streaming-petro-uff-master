@@ -9,7 +9,7 @@ RUN cd /opt/spark/jars && \
     curl -fsSL -O https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.12.262/aws-java-sdk-bundle-1.12.262.jar
 
 # Dependências Python do benchmark
-RUN pip install --no-cache-dir numpy pyarrow
+RUN pip install --no-cache-dir numpy pyarrow boto3 pandas
 
 # Copia o script de benchmark para dentro da imagem
 COPY benchmark_simple/run_spark_benchmark.py /opt/spark/scripts/run_spark_benchmark.py

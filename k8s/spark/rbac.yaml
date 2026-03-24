@@ -1,0 +1,67 @@
+# RBAC para o Spark Operator v2.5.0 no namespace spark
+#
+# Por que este arquivo existe:
+#   O chart do Spark Operator v2.5.0 instala Role/ClusterRole incompletos.
+#   O driver pod usa o SA "spark" para criar/monitorar executor pods,
+#   mas o chart não concede essas permissões ao SA "spark" por padrão.
+#   Sem este arquivo: "pods is forbidden: User system:serviceaccount:spark:spark"
+#
+# Aplicar com:
+#   kubectl apply -f k8s/spark/rbac.yaml
+
+---
+# Nota: o ServiceAccount "spark" é gerenciado pelo eksctl (iamserviceaccount)
+# e contém a annotation eks.amazonaws.com/role-arn para IRSA.
+# NÃO defina o SA aqui — isso removeria a annotation ao aplicar.
+
+# Role: permissões que o driver pod precisa dentro do namespace spark
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: spark-driver-role
+  namespace: spark
+rules:
+  # Gerenciar pods dos executors (deletecollection usado no shutdown do scheduler)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete", "deletecollection", "patch", "update"]
+  # Ler logs dos executors
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list"]
+  # Criar/ler/deletar ConfigMaps (spark-submit injeta configs via ConfigMap e faz cleanup)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "delete", "deletecollection", "patch", "update"]
+  # Criar Services (headless service do driver para os executors se conectarem)
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "delete", "deletecollection", "patch", "update"]
+  # PersistentVolumeClaims (Spark faz cleanup via deletecollection ao encerrar)
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "delete", "deletecollection", "patch", "update"]
+  # Ler eventos (usado pelo driver para monitorar o próprio SparkApplication)
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  # Ler o próprio SparkApplication (driver consulta status)
+  - apiGroups: ["sparkoperator.k8s.io"]
+    resources: ["sparkapplications", "scheduledsparkapplications"]
+    verbs: ["get", "list", "watch"]
+
+---
+# RoleBinding: associa o SA "spark" ao Role acima
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spark-driver-rolebinding
+  namespace: spark
+subjects:
+  - kind: ServiceAccount
+    name: spark
+    namespace: spark
+roleRef:
+  kind: Role
+  name: spark-driver-role
+  apiGroup: rbac.authorization.k8s.io

@@ -4,7 +4,7 @@ kind: ClusterConfig
 metadata:
   name: benchmark-3w
   region: us-east-1
-  version: "1.31"
+  version: "1.33"
 
 iam:
   withOIDC: true   # necessário para IRSA (acesso S3 sem credentials hardcoded)

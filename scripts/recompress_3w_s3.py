@@ -1,9 +1,9 @@
 """
-Re-compressão do dataset 3W: Brotli → Snappy
+Re-compressão do dataset 3W: Brotli → Snappy + upload para S3
 Para rodar no Google Colab (CPU ou GPU).
 
 Fluxo:
-  S3 (Brotli) → download em memória → re-comprime (Snappy) → S3 (Snappy)
+  GitHub (git clone com LFS) → re-comprime localmente (Snappy) → S3 (Snappy)
 
 Uso:
   1. Abra o Google Colab (qualquer runtime — GPU não é obrigatória)
@@ -16,27 +16,37 @@ Uso:
 # CÉLULA 1 — Instalar dependências
 # =============================================================================
 # !pip install -q boto3 pyarrow
+# !sudo apt-get install -y git-lfs -q
+# !git lfs install
 
 # =============================================================================
-# CÉLULA 2 — Configuração
+# CÉLULA 2 — Clonar repositório 3W (com Git LFS para os parquets)
+# =============================================================================
+# !git clone https://github.com/petrobras/3W.git /content/3W
+# !cd /content/3W && git lfs pull
+
+# =============================================================================
+# CÉLULA 3 — Configuração
 # =============================================================================
 import os
 
-# Credenciais AWS (use uma IAM key com s3:GetObject + s3:PutObject + s3:ListBucket)
+# Credenciais AWS (use uma IAM key com s3:PutObject + s3:ListBucket)
 os.environ["AWS_ACCESS_KEY_ID"]     = "SUA_ACCESS_KEY"
 os.environ["AWS_SECRET_ACCESS_KEY"] = "SUA_SECRET_KEY"
 os.environ["AWS_DEFAULT_REGION"]    = "us-east-1"
 
-BUCKET      = "streaming-3w"
-PREFIX      = "3w/dataset"          # prefixo no S3
-COMPRESSION = "snappy"              # codec de destino (snappy ou zstd)
-MAX_WORKERS = 4                     # downloads/uploads paralelos
+DATASET_LOCAL = "/content/3W/dataset"  # caminho local após git clone
+BUCKET        = "streaming-3w"
+S3_PREFIX     = "3w/dataset"           # destino no S3
+COMPRESSION   = "snappy"               # codec de destino
+MAX_WORKERS   = 4                      # uploads paralelos
 
 # =============================================================================
-# CÉLULA 3 — Re-compressão
+# CÉLULA 4 — Re-compressão + upload
 # =============================================================================
 import io
 import time
+import pathlib
 import boto3
 import pyarrow.parquet as pq
 import pyarrow as pa
@@ -44,41 +54,38 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 s3 = boto3.client("s3")
 
-def list_parquet_files(bucket: str, prefix: str) -> list[str]:
-    keys = []
-    paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            if obj["Key"].endswith(".parquet"):
-                keys.append(obj["Key"])
-    return keys
+
+def collect_parquet_files(local_dir: str) -> list[pathlib.Path]:
+    return sorted(pathlib.Path(local_dir).rglob("*.parquet"))
 
 
-def recompress(bucket: str, key: str, compression: str) -> dict:
+def recompress_and_upload(local_path: pathlib.Path, local_root: pathlib.Path,
+                          bucket: str, s3_prefix: str, compression: str) -> dict:
     """
-    Baixa um parquet do S3, re-comprime e re-sobe no mesmo path.
-    Retorna dict com status e tamanho original/novo.
+    Lê um parquet local (suporta Brotli via libbrotli do pyarrow),
+    re-comprime para `compression` e faz upload para S3.
     """
-    result = {"key": key, "ok": False, "original_bytes": 0, "new_bytes": 0}
+    # Calcula o key S3 mantendo a estrutura de diretórios relativa
+    rel = local_path.relative_to(local_root)
+    s3_key = f"{s3_prefix}/{rel}".replace("\\", "/")
+
+    result = {"path": str(local_path), "key": s3_key, "ok": False,
+              "original_bytes": 0, "new_bytes": 0}
     try:
-        # Download em memória
-        resp = s3.get_object(Bucket=bucket, Key=key)
-        data = resp["Body"].read()
-        result["original_bytes"] = len(data)
+        result["original_bytes"] = local_path.stat().st_size
 
         # Lê com pyarrow (suporta Brotli nativamente via libbrotli)
-        buf_in = io.BytesIO(data)
-        table = pq.read_table(buf_in)
+        table = pq.read_table(str(local_path))
 
-        # Re-comprime
+        # Re-comprime em memória
         buf_out = io.BytesIO()
         pq.write_table(table, buf_out, compression=compression)
         buf_out.seek(0)
         new_data = buf_out.read()
         result["new_bytes"] = len(new_data)
 
-        # Upload (sobrescreve o mesmo key)
-        s3.put_object(Bucket=bucket, Key=key, Body=new_data)
+        # Upload para S3
+        s3.put_object(Bucket=bucket, Key=s3_key, Body=new_data)
         result["ok"] = True
 
     except Exception as e:
@@ -87,17 +94,22 @@ def recompress(bucket: str, key: str, compression: str) -> dict:
     return result
 
 
-def run(bucket: str, prefix: str, compression: str, max_workers: int):
-    print(f"Listando arquivos em s3://{bucket}/{prefix} ...")
-    keys = list_parquet_files(bucket, prefix)
-    print(f"  {len(keys)} arquivos encontrados\n")
+def run(local_dir: str, bucket: str, s3_prefix: str,
+        compression: str, max_workers: int):
+    root = pathlib.Path(local_dir)
+    files = collect_parquet_files(local_dir)
+    total = len(files)
+    print(f"Encontrados {total} arquivos em {local_dir}\n")
 
     t0 = time.time()
     ok = err = 0
     original_total = new_total = 0
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(recompress, bucket, k, compression): k for k in keys}
+        futures = {
+            pool.submit(recompress_and_upload, f, root, bucket, s3_prefix, compression): f
+            for f in files
+        }
 
         for i, future in enumerate(as_completed(futures), 1):
             r = future.result()
@@ -111,24 +123,26 @@ def run(bucket: str, prefix: str, compression: str, max_workers: int):
                 status = f"✗ {r.get('error', '')[:60]}"
 
             if i % 50 == 0 or not r["ok"]:
-                pct = i / len(keys) * 100
-                print(f"  [{i:4d}/{len(keys)}] {pct:5.1f}%  {status}  {r['key'].split('/')[-1]}")
+                pct = i / total * 100
+                name = pathlib.Path(r["path"]).name
+                print(f"  [{i:4d}/{total}] {pct:5.1f}%  {status}  {name}  →  {r['key']}")
 
     elapsed = time.time() - t0
     ratio = new_total / original_total if original_total else 1
 
-    print(f"\n{'='*55}")
+    print(f"\n{'='*60}")
     print(f"  Concluído em {elapsed:.0f}s")
     print(f"  Sucesso : {ok}   Erros: {err}")
     print(f"  Original: {original_total/1e6:.1f} MB")
     print(f"  Novo    : {new_total/1e6:.1f} MB  ({ratio:.2f}x)")
-    print(f"{'='*55}")
+    print(f"  S3      : s3://{bucket}/{s3_prefix}/")
+    print(f"{'='*60}")
 
 
-run(BUCKET, PREFIX, COMPRESSION, MAX_WORKERS)
+run(DATASET_LOCAL, BUCKET, S3_PREFIX, COMPRESSION, MAX_WORKERS)
 
 # =============================================================================
-# CÉLULA 4 — (opcional) verificar um arquivo
+# CÉLULA 5 — (opcional) verificar um arquivo no S3
 # =============================================================================
 # import boto3, io, pyarrow.parquet as pq
 #

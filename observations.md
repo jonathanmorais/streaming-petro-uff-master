@@ -293,13 +293,48 @@ Node t3.xlarge: 4 vCPU ≈ 3900m allocatable
 
 São três camadas ortogonais. `cores: 2` não implica `coreRequest: 2000m` — são configurações independentes.
 
+## Como calcular o coreRequest ideal
+
+O `coreRequest` correto cruza dois lados:
+
+**Lado do node (capacidade disponível):**
+
+```bash
+kubectl describe nodes | grep -A 10 "Allocated resources"
+```
+
+```
+Node t3.xlarge: 4000m total
+- 2300m já alocado (sistema + operator + driver)
+= 1700m disponível por node
+÷ 2 executors no mesmo node = 850m por executor
+× 0.80 (margem de segurança) ≈ 680m conservador
+```
+
+**Lado do workload (demanda do processo):**
+
+O benchmark 3W faz leitura de parquet do S3, parsing de schema, janelas deslizantes e agregações — um perfil com I/O wait alto e picos de CPU durante agregações:
+
+```
+pico de CPU: 1.5–2.0 cores por executor (durante agregações)
+média:       0.6–0.8 cores (maior parte é I/O wait esperando S3)
+```
+
+**Fluxo recomendado:**
+
+1. Rodar uma vez com `coreRequest` baixo e `coreLimit` alto para não bloquear o scheduler
+2. Observar o consumo real com `kubectl top pods -n spark`
+3. Usar a **média** observada como `coreRequest` e o **pico** como `coreLimit`
+
+No benchmark 3W, usamos `1200m` como estimativa inicial antes de ter dados reais — valor que cabe nos nodes (resolve o `FailedScheduling`) e não causa starvation de CPU para o workload.
+
 ## A solução
 
 Separar o paralelismo Spark do request K8s:
 
 ```yaml
 executor:
-  cores: 2          # Spark usa 2 slots de execução internamente
+  cores: 2              # Spark usa 2 slots de execução internamente
   coreRequest: "1200m"  # K8s reserva apenas 1.2 vCPU → cabe nos nodes
   coreLimit: "2000m"    # pode usar até 2 vCPU quando o node estiver ocioso
 ```
@@ -346,3 +381,183 @@ Com essa config, o Spark lê timestamps NANOS como valores `Long` (nanossegundos
 | Pré-processar para microssegundos | Microssegundos (perde 1000x) | Funciona nativamente |
 
 Para o benchmark 3W, `nanosAsLong=true` é a escolha correta: preserva o dado original e o pipeline converte para timestamp de evento via divisão (`/ 1_000` para microssegundos, ou `/ 1_000_000` para milissegundos conforme necessário).
+
+---
+
+# 🗂️ Inconsistências de schema no dataset 3W
+
+O dataset 3W é composto por centenas de arquivos parquet gerados ao longo de anos por diferentes versões do código de coleta da Petrobras. Cada arquivo foi gravado de forma independente, sem garantia de schema unificado. Isso produz três classes de inconsistência que um engine de processamento distribuído precisa tratar.
+
+## 1. Codec de compressão heterogêneo (Brotli vs Snappy)
+
+Arquivos mais antigos (subdiretórios `1/`, `8/`) foram comprimidos com **Brotli**, enquanto os mais recentes usam **Snappy** ou sem compressão.
+
+**Impacto no Spark:** o Hadoop do Spark não inclui `BrotliCodec` na distribuição padrão. Ao encontrar um arquivo Brotli, o executor falha com:
+```
+ClassNotFoundException: org.apache.hadoop.io.compress.BrotliCodec
+```
+
+**Solução:** re-comprimir o dataset inteiro para Snappy antes de subir para S3. O script `scripts/recompress_3w_s3.ipynb` faz isso usando pyarrow (que suporta Brotli nativamente) no Google Colab.
+
+---
+
+## 2. Tipo físico do índice temporal: TIMESTAMP(NANOS) vs INT64
+
+O índice `DatetimeIndex` do pandas é serializado pelo pyarrow como `INT64` com anotação `TIMESTAMP(NANOS, UTC=false)` em arquivos mais antigos. Arquivos gerados por versões mais recentes do pyarrow podem usar `TIMESTAMP(MICROS)`.
+
+**Impacto no Spark:** o leitor Parquet do Spark rejeita `TIMESTAMP(NANOS)` na fase de análise de schema (driver-side), antes mesmo de executar qualquer task:
+```
+AnalysisException: Illegal Parquet type: INT64 (TIMESTAMP(NANOS,false))
+```
+
+**Detalhe importante:** configurar `spark.sql.parquet.nanosAsLong=true` via `SparkSession.builder.config()` não funciona em cluster mode porque `.getOrCreate()` devolve a sessão já criada pelo `spark-submit` e ignora os configs do builder. O único modo confiável é `spark.conf.set()` após obter a sessão:
+
+```python
+spark = SparkSession.builder.appName("...").getOrCreate()
+spark.conf.set("spark.sql.parquet.nanosAsLong", "true")
+```
+
+---
+
+## 3. Tipo físico da coluna `class`: INT32 vs DOUBLE
+
+A coluna `class` representa o código de evento do poço (0 = normal, 1–8 = tipos de falha). Em arquivos mais antigos ela foi gravada como `INT32` (inteiro); versões mais recentes do pipeline de coleta a gravam como `FLOAT64` (double).
+
+**Impacto no Spark:** ao usar schema explícito com `DoubleType` para `class`, o leitor vetorizado falha em arquivos com `INT32` físico:
+```
+SchemaColumnConvertNotSupportedException: column: [class], physicalType: INT32, logicalType: double
+```
+
+O leitor vetorizado (`VectorizedParquetRecordReader`) não faz coerção implícita de tipos para evitar overhead de conversão. O leitor row-based, por sua vez, converte automaticamente.
+
+**Solução:**
+```python
+spark.conf.set("spark.sql.parquet.enableVectorizedReader", "false")
+```
+
+Isso ativa o leitor row-based para todos os arquivos Parquet da sessão, com coerção implícita INT32 → double. O custo é uma leve redução de throughput na leitura (o leitor vetorizado é mais rápido em colunas homogêneas), mas é negligenciável para um dataset do tamanho do 3W.
+
+---
+
+## Resumo das inconsistências
+
+| Inconsistência | Arquivos afetados | Erro no Spark | Solução |
+|---|---|---|---|
+| Brotli codec | `1/`, `8/` (arquivos antigos) | `ClassNotFoundException: BrotliCodec` | Re-comprimir para Snappy via pyarrow |
+| TIMESTAMP(NANOS) | Maioria dos arquivos | `AnalysisException: Illegal Parquet type` | `spark.conf.set("spark.sql.parquet.nanosAsLong", "true")` |
+| `class` INT32 vs DOUBLE | Subdiretório `8/` | `SchemaColumnConvertNotSupportedException` | `spark.conf.set("spark.sql.parquet.enableVectorizedReader", "false")` |
+
+Essas inconsistências são típicas de datasets industriais de longa duração: o schema evolui conforme as ferramentas de coleta são atualizadas, mas os dados históricos não são retroativamente reprocessados. Um pipeline de ingestão robusto precisa lidar com todas as variantes simultaneamente.
+
+---
+
+# 🔧 Solução definitiva para TIMESTAMP(NANOS): boto3 + pyarrow no driver
+
+## O problema raiz
+
+Mesmo com `spark.conf.set("spark.sql.parquet.nanosAsLong", "true")` e `enableVectorizedReader=false`, o erro persistia nos executors:
+
+```
+AnalysisException: Illegal Parquet type: INT64 (TIMESTAMP(NANOS,false))
+Task 0 in stage 0.0 failed 4 times
+```
+
+O motivo: `spark.conf.set()` altera o `SQLConf` da sessão do **driver**, que é thread-local. Os executors rodam em JVMs separadas e criam seus próprios `SQLConf` ao inicializar — esse não herda o estado do driver. Em cluster mode no EKS, driver e executors são pods diferentes; não há memória compartilhada.
+
+`spark.hadoop.X=Y` no YAML injeta `X=Y` no `HadoopConf` de todos os nós, mas o `ParquetToSparkSchemaConverter` nos executors lê `nanosAsLong` do `SQLConf`, não do `HadoopConf` — portanto não resolve.
+
+## A solução
+
+Substituir `spark.read.parquet()` por **boto3 + pyarrow** para a leitura do dataset original:
+
+```python
+# Lê diretamente do S3 sem passar pelo leitor Parquet do Spark
+obj = s3.get_object(Bucket=bucket, Key=key)
+table = pq.read_table(io.BytesIO(obj["Body"].read()))
+
+# Normaliza em Python puro — sem depender do SQLConf dos executors
+for field in table.schema:
+    col = table.column(field.name)
+    if field.name == "timestamp" and pa.types.is_timestamp(col.type):
+        cols[field.name] = col.cast(pa.int64())   # NANOS → int64
+    elif field.name == "class":
+        cols[field.name] = col.cast(pa.float64())  # INT32 → float64
+```
+
+O pyarrow suporta `TIMESTAMP(NANOS)` nativamente sem nenhuma configuração. Após normalizar os tipos, o DataFrame pandas é convertido para Spark com `spark.createDataFrame()` — que só recebe dados com tipos limpos — e gravado em S3 como staging.
+
+## Por que funciona
+
+O Spark só enfrenta os arquivos do dataset original durante a leitura feita pelo driver via boto3+pyarrow. O staging gravado no S3 já contém tipos nativos do Spark (`LongType` para timestamp, `DoubleType` para class, `DoubleType` para sensores). Os executors nunca veem um arquivo com `TIMESTAMP(NANOS)`.
+
+## Trade-off
+
+| Abordagem | Paralelo | NANOS fix | Problema |
+|---|---|---|---|
+| `spark.read.parquet()` + `nanosAsLong=true` | Sim (executors) | Não funciona em cluster mode | SQLConf não herda para executors |
+| boto3+pyarrow no driver | Não (driver single-threaded) | Sim | Leitura sequencial no driver |
+| Re-comprimir dataset no Colab (`recompress_3w_s3.ipynb`) | Sim | Sim (permanente) | Custo único de reprocessamento |
+
+Para o dataset 3W com 100K registros amostrados, a leitura sequencial no driver leva ~40s — aceitável. Para um dataset completo (2.8M registros), a solução definitiva de longo prazo é executar o notebook `scripts/recompress_3w_s3.ipynb` que normaliza e re-grava todos os parquets no S3.
+
+---
+
+# 📊 Resultados do benchmark Spark no EKS (cluster mode)
+
+## Configuração do experimento
+
+| Parâmetro | Valor |
+|---|---|
+| Engine | Spark Structured Streaming 3.5.3 |
+| Modo | Cluster mode (Spark Operator, EKS) |
+| Nodes | 2× t3.xlarge (4 vCPU, 16 GB cada) |
+| Driver | 2 cores, 4 GB |
+| Executors | 4× (2 cores, 3 GB cada) |
+| Dataset | 3W Petrobras — 2.228 arquivos parquet |
+| Registros amostrados | 100.000 (de 2.835.284 disponíveis) |
+| Janela de agregação | 60 segundos |
+| Output mode | `complete` (memory sink) → batch write no S3 |
+
+## Resultados
+
+| Métrica | Valor |
+|---|---|
+| Tempo total de processamento | 31,09 s |
+| Throughput | 3.216 rec/s |
+| Janelas de 60s processadas | 36.182 |
+| Latência P50 | 65.070 ms (~65 s) |
+| Latência P95 | 65.070 ms (~65 s) |
+| Latência P99 | 65.070 ms (~65 s) |
+| Latência média | 65.070 ms (~65 s) |
+| Intervalo temporal dos dados | 2011-08-30 a 2019-08-23 |
+
+## Interpretação da latência uniforme
+
+A latência de ~65s é **constante e uniforme** (P50=P95=P99). Isso não é um erro — é uma consequência do design do benchmark:
+
+1. Todos os 100K registros recebem o mesmo `producer_ts_ms` no momento da escrita do staging (timestamp de ingestão é único por execução)
+2. O streaming processa todos os registros em um único micro-batch (`trigger(once=True)`)
+3. `latency_ms = processing_ts_ms − max_producer_ts_ms` ≈ (tempo de staging + tempo de streaming) para todas as janelas
+
+**O que essa latência mede:** tempo total do pipeline desde a ingestão simulada até a saída do processamento — uma métrica válida de *end-to-end pipeline latency* para dados em batch.
+
+**O que não mede:** latência individual de eventos chegando em tempo real (isso exigiria um Kafka producer que emita registros com timestamps reais, um a um, para o streaming consumir).
+
+## Por que `outputMode("complete")` foi necessário
+
+Com `trigger(once=True)` e watermark em modo `append`:
+
+- Batch 0 processa todos os dados, mas o watermark inicia em `1970-01-01T00:00:00Z` (epoch zero)
+- Em `append` mode, janelas só são emitidas quando o watermark supera o fim da janela
+- O watermark só avança **no batch seguinte** — mas com `trigger(once=True)` não há batch seguinte
+- Resultado: 0 janelas emitidas, mesmo com 100.000 registros processados
+
+Confirmado pelos logs: `"watermark": "1970-01-01T00:00:00.000Z"` com `numInputRows: 100000`.
+
+`outputMode("complete")` emite **todo o estado atual** a cada batch, independente do watermark — resolvendo o problema. O parquet sink não suporta `complete` mode, então os resultados são coletados da memory sink e escritos no S3 como batch write.
+
+## Diretório de staging: `_staging` → `staging`
+
+O `FileStreamSource` do Spark ignora recursivamente qualquer arquivo cujo path contenha componentes começando com `_` ou `.` (mesma convenção do HDFS para arquivos de sistema). O staging em `OUTPUT_PATH/_staging` fazia com que **todos os parquets fossem silenciosamente ignorados** pelo streaming, resultando em 0 registros lidos.
+
+Renomear para `OUTPUT_PATH/staging` (sem o `_`) resolveu o problema.
