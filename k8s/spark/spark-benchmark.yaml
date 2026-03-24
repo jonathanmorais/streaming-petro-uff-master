@@ -7,7 +7,7 @@ spec:
   type: Python
   pythonVersion: "3"
   mode: cluster
-  image: 428655986332.dkr.ecr.us-east-1.amazonaws.com/spark-benchmark:latest
+  image: <ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/spark-benchmark:latest
   imagePullPolicy: Always
   mainApplicationFile: "local:///opt/spark/scripts/run_spark_benchmark.py"
   sparkVersion: "3.5.3"
