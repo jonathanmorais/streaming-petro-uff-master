@@ -561,3 +561,30 @@ Confirmado pelos logs: `"watermark": "1970-01-01T00:00:00.000Z"` com `numInputRo
 O `FileStreamSource` do Spark ignora recursivamente qualquer arquivo cujo path contenha componentes começando com `_` ou `.` (mesma convenção do HDFS para arquivos de sistema). O staging em `OUTPUT_PATH/_staging` fazia com que **todos os parquets fossem silenciosamente ignorados** pelo streaming, resultando em 0 registros lidos.
 
 Renomear para `OUTPUT_PATH/staging` (sem o `_`) resolveu o problema.
+
+---
+
+# 🪟 O que são as "janelas" no benchmark
+
+O pipeline usa `groupBy(window("event_time", "60 seconds"), "class")`. Para cada combinação de **intervalo de 60s × classe de evento**, o Spark cria uma janela de agregação. Por exemplo:
+
+```
+janela [2015-03-01 10:00, 2015-03-01 10:01) | class=0.0  → 3 registros
+janela [2015-03-01 10:00, 2015-03-01 10:01) | class=1.0  → 1 registro
+janela [2015-03-01 10:01, 2015-03-01 10:02) | class=0.0  → 5 registros
+...
+```
+
+Cada janela produz uma linha de saída com as métricas agregadas daquele período: contagem de registros, média e desvio padrão de cada sensor (P-PDG, P-TPT, T-TPT etc.).
+
+## Por que 36.182 janelas com 100K registros?
+
+O dataset 3W cobre dados de **2011 a 2019** (~8 anos). Com janelas de 60s e até 9 classes de evento, o número máximo teórico de janelas seria enorme — mas na prática depende de quantos intervalos de 60s têm ao menos 1 registro na amostra.
+
+Com 100K registros distribuídos por ~8 anos (≈ 4 milhões de minutos possíveis), a **densidade é baixa**: a maioria das janelas tem 1–3 registros (mediana = 2, P95 = 6, P99 = 9, máximo = 19).
+
+Isso é esperado para dados industriais de sensores offshore: os poços são monitorados continuamente, mas eventos anômalos (classes 1–8) são raros e os dados normais (classe 0) são amostrados periodicamente, não em fluxo contínuo.
+
+## Significado para a dissertação
+
+Cada janela representa a **agregação de 60 segundos da operação de um poço** numa determinada condição operacional. O benchmark mede a capacidade do Spark de processar em streaming todas essas janelas, calculando estatísticas por sensor que poderiam alimentar, por exemplo, um sistema de detecção de anomalias em tempo real.
