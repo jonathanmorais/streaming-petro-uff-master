@@ -1,0 +1,31 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: normalize-3w-dataset
+  namespace: spark
+spec:
+  backoffLimit: 0        # não tenta de novo se falhar — reprocessamento parcial pode corromper
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      serviceAccountName: spark   # IRSA — acesso S3 via WebIdentityToken
+      restartPolicy: Never
+      containers:
+        - name: normalizer
+          image: 428655986332.dkr.ecr.us-east-1.amazonaws.com/spark-benchmark:latest
+          imagePullPolicy: Always
+          command: ["python3", "/opt/spark/scripts/normalize_dataset.py"]
+          env:
+            - name: SRC_PATH
+              value: "s3://streaming-3w/3w/dataset"
+            - name: DST_PATH
+              value: "s3://streaming-3w/3w/dataset"   # overwrite in-place
+            - name: WORKERS
+              value: "16"   # threads paralelas de leitura/escrita S3
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"

@@ -347,6 +347,102 @@ Em clusters compartilhados ou de tamanho fixo (como o benchmark com 2× t3.xlarg
 
 ---
 
+# 🧠 O driver Spark consome um nó inteiro
+
+## Descoberta
+
+Ao migrar para nós `c6g.xlarge` (4 vCPU, **8 GB** RAM), todos os executor pods ficaram em
+`FailedScheduling: Insufficient memory` mesmo com 3 nós disponíveis. Análise do `kubectl describe nodes`:
+
+```
+Nó 1: 4500Mi alocados de ~6800Mi → 2300Mi livres
+Nó 2: 5734Mi alocados (84%)      → 1066Mi livres   ← driver aqui
+Nó 3: 4640Mi alocados de ~6800Mi → 2160Mi livres
+```
+
+O driver com `memory: "4g"` ocupa ~4.5GB (4096Mi + 400Mi de overhead do JVM). Em nós de 8GB,
+isso representa **mais da metade da capacidade do nó**. Combinado com os pods do sistema
+(kube-proxy, aws-node, coredns, Spark Operator), o nó do driver ficou com apenas ~1GB livre —
+insuficiente para qualquer executor (que pedia 3g + 384Mi = ~3.5GB).
+
+## Lição
+
+O driver não é um processo leve. Ele mantém em memória:
+- O plano de execução do DAG completo
+- O estado do Structured Streaming (watermarks, offsets, progresso das queries)
+- O resultado da memory sink (`outputMode("complete")` coleta todas as janelas no driver)
+- O contexto JVM + Python do PySpark
+
+Em cluster Spark com nós pequenos, o driver frequentemente **monopoliza um nó inteiro**. Isso
+é esperado e correto — o nó do driver não deve competir com executors por memória. A solução
+é dimensionar o cluster considerando `1 nó para o driver + N nós para executors`, não dividindo
+o driver entre os nós dos executors.
+
+## Ajuste aplicado (c6g.xlarge, 8GB)
+
+```yaml
+driver:
+  memory: "2g"      # reduzido de 4g — suficiente pois staging agora é distribuído
+
+executor:
+  instances: 2      # reduzido de 4 — limitado pela RAM disponível
+  memory: "1500m"   # 1500Mi + 384Mi overhead = ~1.9GB por executor
+```
+
+```
+Nó 2: driver 2g + overhead = ~2.3GB → sobra ~4.5GB para sistema e overhead
+Nó 1: exec-1 1.5g + 384Mi = ~1.9GB → cabe nos 2.3GB livres após sistema
+Nó 3: exec-2 1.5g + 384Mi = ~1.9GB → cabe nos 2.2GB livres após sistema
+```
+
+Para escalar horizontalmente sem trocar instância, o caminho correto é aumentar o número de
+nós (não o tamanho), pois cada executor vai para um nó diferente.
+
+---
+
+# ⚙️ Benchmark 3W é CPU-bound, não memory-bound
+
+## Observação
+
+Após ajustar a memória para o mínimo que o scheduler aceita (`driver: 2g`, `executor: 1500m`),
+o benchmark rodou sem degradação perceptível de performance. Isso indica que o workload não
+estava usando a memória extra — estava apenas reservada pelo K8s sem ser consumida.
+
+## Por quê
+
+O pipeline 3W tem três fases com perfis de recursos distintos:
+
+| Fase | Gargalo | Memória usada |
+|---|---|---|
+| Staging (spark.read.parquet distribuído) | I/O: latência S3, rede | Baixa — Spark faz streaming de partições |
+| Agregação de janelas (groupBy + window) | CPU: shuffle, sort, hash | Moderada — estado das janelas em memória |
+| Escrita de resultados (S3) | I/O: throughput S3 | Baixa |
+
+As janelas de 60s com mediana de 2 registros cada são **muito pequenas** — o estado de
+agregação de 36.182 janelas × ~200 bytes por janela = ~7MB total. Isso cabe folgadamente em
+qualquer configuração de memória razoável.
+
+O que consome CPU é o shuffle entre executors durante o `groupBy(window(...), "class")`: o
+Spark precisa redistribuir todos os registros pelos seus timestamps de janela (operação de
+sort + repartição por chave), que é intensiva em CPU e I/O de rede entre pods.
+
+## Implicação para dimensionamento
+
+Para este workload, **mais vCPUs por executor** tem mais impacto do que mais RAM. A configuração
+ideal para c6g (Graviton, eficiente em operações inteiras e sort) seria:
+
+```yaml
+executor:
+  cores: 2          # 2 tasks paralelas por executor
+  coreLimit: "2000m"  # deixa usar até 2 vCPU inteiros durante o shuffle
+  memory: "1500m"   # suficiente para o estado das janelas
+```
+
+Em vez de aumentar `memory`, o ganho real viria de usar instâncias com mais vCPUs
+(`c6g.2xlarge`: 8 vCPU, 16GB) ou adicionar mais nós executors.
+
+---
+
 # 🕐 Timestamps em nanossegundos no dataset 3W
 
 ## O problema

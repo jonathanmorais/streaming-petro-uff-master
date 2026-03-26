@@ -3,11 +3,8 @@
 Spark Structured Streaming benchmark — dataset 3W
 Adaptado para rodar em cluster mode via Spark Operator no EKS.
 
-Diferenças em relação ao run.py (local mode):
-  - Sem .master("local[*]") — o Spark Operator injeta o master do cluster
-  - Dataset lido do S3 via Spark (não pandas) usando s3a://
-  - Dados de staging gravados no S3 (não em tmpdir local)
-  - Resultados e métricas salvos no S3
+O dataset deve estar normalizado (Snappy, timestamp int64, class float64).
+Use k8s/normalize-job.yaml para normalizar antes de rodar o benchmark.
 
 Variáveis de ambiente (obrigatórias):
   DATASET_PATH   s3a://seu-bucket-3w/3w/dataset
@@ -15,8 +12,8 @@ Variáveis de ambiente (obrigatórias):
 
 Variáveis de ambiente (opcionais):
   MAX_ROWS       100000   (0 = sem limite)
-  MAX_FILES      5        (arquivos parquet por classe de evento)
 """
+
 from __future__ import annotations
 
 import json
@@ -40,7 +37,6 @@ if not DATASET_PATH or not OUTPUT_PATH:
     sys.exit(1)
 
 MAX_ROWS  = int(os.environ.get("MAX_ROWS", "100000"))
-MAX_FILES = int(os.environ.get("MAX_FILES", "5"))
 
 STAGING_PATH = f"{OUTPUT_PATH}/staging"
 RESULTS_PATH = f"{OUTPUT_PATH}/stream_results"
@@ -50,167 +46,55 @@ SENSOR_COLS = [
     "P-JUS-CKP", "P-MON-CKGL", "P-JUS-CKGL", "QGL", "QBS",
 ]
 
-# Schema explícito do dataset 3W v2.
-# O índice DatetimeIndex do pandas é gravado como INT64 TIMESTAMP(NANOS) no Parquet.
-# Spark rejeita NANOS por padrão; ao fornecer LongType explicitamente
-# o Spark lê os bytes INT64 diretamente sem passar pelo conversor de tipos.
-def schema_3w():
-    from pyspark.sql.types import StructType, StructField, LongType, DoubleType
-    fields = [StructField("timestamp", LongType(), True)]
-    fields += [StructField(c, DoubleType(), True) for c in SENSOR_COLS]
-    fields += [StructField("class", DoubleType(), True)]
-    return StructType(fields)
-
-
 # ---------------------------------------------------------------------------
 # Spark Session (sem .master() — cluster mode gerenciado pelo Operator)
 # ---------------------------------------------------------------------------
 def build_spark():
     from pyspark.sql import SparkSession
-
-    # Em cluster mode, .getOrCreate() devolve a sessão já criada pelo spark-submit
-    # e ignora os .config() do builder. Usar spark.conf.set() após obter a sessão
-    # é o único modo confiável de alterar SQLConf em cluster mode.
     spark = SparkSession.builder.appName("3W-Benchmark-Spark").getOrCreate()
-
-    # --- NANOS fix (três camadas para garantir cobertura total) ---
-    # 1. SQLConf do driver: usado na inferência de schema (driver-side).
-    spark.conf.set("spark.sql.parquet.nanosAsLong", "true")
-
-    # 2. HadoopConf do SparkContext: copiado por newHadoopConf() ao construir
-    #    o broadcast conf que os executors recebem. O leitor row-based lê
-    #    nanosAsLong diretamente deste conf (ParquetToSparkSchemaConverter(conf)).
-    spark.sparkContext._jsc.hadoopConfiguration().set(
-        "spark.sql.parquet.nanosAsLong", "true")
-
-    # 3. Força leitor row-based: o leitor vetorizado lê nanosAsLong de SQLConf.get
-    #    nos executors, que não herda a sessão do driver. O row-based lê do
-    #    HadoopConf (item 2 acima), que chega corretamente aos executors.
-    spark.conf.set("spark.sql.parquet.enableVectorizedReader", "false")
-
-    spark.conf.set("spark.sql.files.ignoreCorruptFiles", "true")
     spark.conf.set("spark.sql.streaming.checkpointLocation",
                    f"{OUTPUT_PATH}/_checkpoint")
     return spark
 
 
 # ---------------------------------------------------------------------------
-# 1. Carrega dataset do S3 com boto3+pyarrow (bypassa o leitor Parquet do Spark)
+# 1. Carrega dataset do S3 com spark.read.parquet() distribuído
 # ---------------------------------------------------------------------------
 def load_dataset_to_staging(spark) -> int:
     """
-    Lê os parquets do dataset 3W diretamente do S3 usando boto3+pyarrow,
-    normaliza TIMESTAMP_NANOS→int64 e class INT32→float64 em Python puro,
-    converte para Spark DataFrame e grava em STAGING_PATH.
+    Lê os parquets normalizados do dataset 3W via spark.read.parquet() distribuído,
+    amostra MAX_ROWS registros, adiciona colunas de tempo e grava em STAGING_PATH.
 
-    Por que boto3+pyarrow em vez de spark.read.parquet():
-      O dataset 3W contém TIMESTAMP(NANOS,false) que o Spark 3.5.3 não lê
-      nos executors — nanosAsLong=true é session-local no driver e não é
-      herdado pelos SQLConf dos executors. pyarrow lida com NANOS nativamente.
-
-    Retorna o número de registros gravados.
+    Pré-requisito: dataset normalizado com k8s/normalize-job.yaml
+    (Snappy, timestamp int64, class float64 — sem TIMESTAMP(NANOS) nem Brotli).
     """
-    import io
-    import random
-    import boto3
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-    import pandas as pd
+    import pyspark.sql.functions as F
 
-    print(f"[1/3] Lendo dataset de {DATASET_PATH} via boto3+pyarrow ...")
+    print(f"[1/3] Lendo dataset de {DATASET_PATH} ...")
 
-    # Extrai bucket e prefix do caminho s3a://bucket/prefix
-    s3_path = DATASET_PATH.replace("s3a://", "").replace("s3://", "")
-    bucket_name = s3_path.split("/")[0]
-    prefix = "/".join(s3_path.split("/")[1:])
-    if prefix and not prefix.endswith("/"):
-        prefix += "/"
+    df = (
+        spark.read
+        .option("recursiveFileLookup", "true")
+        .parquet(DATASET_PATH)
+    )
 
-    s3 = boto3.client("s3")
+    df = df.withColumn("class", F.col("class").cast("double"))
+    df = df.withColumn("timestamp_ms", (F.col("timestamp") / 1_000_000).cast("long"))
+    df = df.withColumn("producer_ts_ms", F.lit(int(time.time() * 1000)))
 
-    # Lista todos os arquivos .parquet recursivamente
-    parquet_keys: list[str] = []
-    paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            if obj["Key"].endswith(".parquet"):
-                parquet_keys.append(obj["Key"])
-
-    print(f"  Arquivos parquet encontrados: {len(parquet_keys)}")
-    if not parquet_keys:
-        print("[ERRO] Nenhum arquivo parquet encontrado em DATASET_PATH.")
-        sys.exit(1)
-
-    # Limita arquivos para evitar OOM no driver (MAX_FILES * 20 como teto)
-    if MAX_FILES > 0 and len(parquet_keys) > MAX_FILES * 20:
-        random.seed(42)
-        random.shuffle(parquet_keys)
-        parquet_keys = parquet_keys[: MAX_FILES * 20]
-        print(f"  Limitado a {len(parquet_keys)} arquivos (MAX_FILES={MAX_FILES})")
-
-    # Lê e normaliza cada arquivo com pyarrow
-    frames: list[pd.DataFrame] = []
-    errors = 0
-    for key in parquet_keys:
-        try:
-            obj = s3.get_object(Bucket=bucket_name, Key=key)
-            buf = io.BytesIO(obj["Body"].read())
-            table = pq.read_table(buf)
-
-            cols = {}
-            for field in table.schema:
-                col = table.column(field.name)
-                if field.name == "timestamp" and pa.types.is_timestamp(col.type):
-                    # TIMESTAMP_NANOS → int64 (nanosegundos)
-                    cols[field.name] = col.cast(pa.int64())
-                elif field.name == "class":
-                    # INT32 ou DOUBLE → float64 uniforme
-                    cols[field.name] = col.cast(pa.float64())
-                else:
-                    cols[field.name] = col
-
-            frames.append(pa.table(cols).to_pandas())
-        except Exception as e:
-            errors += 1
-            if errors <= 5:
-                print(f"  [WARN] Pulando {key}: {e}")
-
-    if not frames:
-        print("[ERRO] Nenhum arquivo lido com sucesso.")
-        sys.exit(1)
-
-    print(f"  Arquivos lidos: {len(frames)}  (erros ignorados: {errors})")
-
-    df_pd = pd.concat(frames, ignore_index=True)
-    total = len(df_pd)
+    total = df.count()
     print(f"  Total de registros: {total:,}")
 
-    # Amostragem
     if MAX_ROWS > 0 and total > MAX_ROWS:
-        df_pd = df_pd.sample(n=MAX_ROWS, random_state=42).reset_index(drop=True)
-        print(f"  Amostra: {len(df_pd):,} registros ({MAX_ROWS} solicitados)")
-    else:
-        print(f"  Usando todos os {total:,} registros (sem limite)")
+        fraction = min(1.0, (MAX_ROWS * 1.1) / total)
+        df = df.sample(fraction=fraction, seed=42).limit(MAX_ROWS)
+        print(f"  Amostra: {MAX_ROWS:,} registros")
 
-    # Adiciona colunas derivadas
-    if "timestamp_ms" not in df_pd.columns:
-        df_pd["timestamp_ms"] = (df_pd["timestamp"] // 1_000_000).astype("int64")
+    n_partitions = max(1, min(20, (MAX_ROWS or total) // 5000))
+    df.repartition(n_partitions).write.mode("overwrite").parquet(STAGING_PATH)
+    print(f"  Staging gravado em {STAGING_PATH} ({n_partitions} partições)")
 
-    df_pd["producer_ts_ms"] = int(time.time() * 1000)
-
-    # Garante float64 nas colunas de sensor
-    for c in SENSOR_COLS:
-        if c in df_pd.columns:
-            df_pd[c] = df_pd[c].astype("float64")
-
-    # Converte para Spark DataFrame e grava staging no S3
-    print(f"  Convertendo para Spark e gravando em {STAGING_PATH} ...")
-    n_records = len(df_pd)
-    n_partitions = max(1, min(20, n_records // 5000))
-    spark.createDataFrame(df_pd).repartition(n_partitions).write.mode("overwrite").parquet(STAGING_PATH)
-    print(f"  Staging gravado: {n_records:,} registros em {n_partitions} partições")
-
-    return n_records
+    return min(MAX_ROWS, total) if MAX_ROWS > 0 else total
 
 
 # ---------------------------------------------------------------------------

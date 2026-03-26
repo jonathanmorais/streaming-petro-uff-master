@@ -177,7 +177,7 @@ aws ecr get-login-password --region $REGION \
     $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com
 
 # Build e push
-docker build -f Dockerfile.spark-benchmark -t $IMAGE .
+docker build -f Dockerfile.spark-benchmark -t --platform linux/arm64 $IMAGE .
 docker push $IMAGE
 
 # Atualiza o YAML com o account ID correto

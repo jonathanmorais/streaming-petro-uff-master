@@ -7,7 +7,7 @@ spec:
   type: Python
   pythonVersion: "3"
   mode: cluster
-  image: <ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/spark-benchmark:latest
+  image: 428655986332.dkr.ecr.us-east-1.amazonaws.com/spark-benchmark:latest
   imagePullPolicy: Always
   mainApplicationFile: "local:///opt/spark/scripts/run_spark_benchmark.py"
   sparkVersion: "3.5.3"
@@ -15,14 +15,14 @@ spec:
     type: Never
   driver:
     cores: 2
-    memory: "4g"
+    memory: "2g"
     serviceAccount: spark      # tem a IAM role com acesso S3 via IRSA
   executor:
-    cores: 2
-    coreRequest: "700m"
-    coreLimit: "1500m"
-    instances: 4
-    memory: "3g"
+    cores: 2 # evitar overcommit de CPU — pode causar throttling e degradação de performance
+    coreRequest: "700m" # evitar overcommit de CPU — pode causar throttling e degradação de performance
+    coreLimit: "1500m" # tolerar picos de CPU sem throttling — Spark pode usar mais CPU em momentos de alta demanda
+    instances: 2
+    memory: "1500m"
     serviceAccount: spark  # IRSA: mesma role do driver — executors também precisam de acesso S3
   sparkConf:
     "spark.jars.ivy": "/tmp/.ivy"
@@ -32,9 +32,5 @@ spec:
     "spark.kubernetes.driverEnv.DATASET_PATH": "s3a://streaming-3w/3w/dataset"
     "spark.kubernetes.driverEnv.OUTPUT_PATH": "s3a://streaming-3w/results/spark"
     "spark.kubernetes.executor.serviceAccountName": "spark"
-    # nanosAsLong via SQLConf só alcança o driver (spark.conf.set).
-    # O leitor vetorizado nos executors usa SQLConf.get que não herda a sessão do driver.
-    # Solução: usar o leitor row-based, que lê nanosAsLong do HadoopConf.
-    # spark.hadoop.X=Y injeta X=Y no HadoopConf de todos os nós (driver + executors).
-    "spark.sql.parquet.enableVectorizedReader": "false"
-    "spark.hadoop.spark.sql.parquet.nanosAsLong": "true"
+    # Dataset normalizado via k8s/normalize-job.yaml — sem TIMESTAMP(NANOS) nem Brotli.
+    # Leitor vetorizado padrão funciona sem workarounds.

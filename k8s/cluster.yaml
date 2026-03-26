@@ -11,10 +11,10 @@ iam:
 
 managedNodeGroups:
   - name: benchmark-nodes
-    instanceType: t3.xlarge   # 4 vCPU, 16GB RAM
-    minSize: 2
-    maxSize: 2
-    desiredCapacity: 2
+    instanceType: c6g.xlarge   # 4 vCPU, 16GB RAM
+    minSize: 3
+    maxSize: 3
+    desiredCapacity: 3
     volumeSize: 40
     labels:
       role: benchmark
