@@ -90,7 +90,7 @@ def load_dataset_to_staging(spark) -> int:
         df = df.sample(fraction=fraction, seed=42).limit(MAX_ROWS)
         print(f"  Amostra: {MAX_ROWS:,} registros")
 
-    n_partitions = max(1, min(20, (MAX_ROWS or total) // 5000))
+    n_partitions = max(4, min(200, (MAX_ROWS or total) // 5000))
     df.repartition(n_partitions).write.mode("overwrite").parquet(STAGING_PATH)
     print(f"  Staging gravado em {STAGING_PATH} ({n_partitions} partições)")
 

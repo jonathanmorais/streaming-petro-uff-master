@@ -18,19 +18,21 @@ spec:
     memory: "2g"
     serviceAccount: spark      # tem a IAM role com acesso S3 via IRSA
   executor:
-    cores: 2 # evitar overcommit de CPU — pode causar throttling e degradação de performance
-    coreRequest: "700m" # evitar overcommit de CPU — pode causar throttling e degradação de performance
-    coreLimit: "1500m" # tolerar picos de CPU sem throttling — Spark pode usar mais CPU em momentos de alta demanda
-    instances: 2
+    cores: 2
+    coreRequest: "700m"
+    coreLimit: "1500m"
+    instances: 9        # ~3 por nó (driver ocupa um nó parcialmente)
     memory: "1500m"
     serviceAccount: spark  # IRSA: mesma role do driver — executors também precisam de acesso S3
   sparkConf:
     "spark.jars.ivy": "/tmp/.ivy"
-    "spark.sql.shuffle.partitions": "8"
+    "spark.sql.shuffle.partitions": "24"
     "spark.hadoop.fs.s3a.aws.credentials.provider": "com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
     "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem"
     "spark.kubernetes.driverEnv.DATASET_PATH": "s3a://streaming-3w/3w/dataset"
     "spark.kubernetes.driverEnv.OUTPUT_PATH": "s3a://streaming-3w/results/spark"
     "spark.kubernetes.executor.serviceAccountName": "spark"
+    "spark.kubernetes.executor.request.cores": "700m"
+    "spark.kubernetes.executor.limit.cores": "1500m"
     # Dataset normalizado via k8s/normalize-job.yaml — sem TIMESTAMP(NANOS) nem Brotli.
     # Leitor vetorizado padrão funciona sem workarounds.
